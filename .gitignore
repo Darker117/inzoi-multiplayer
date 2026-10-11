@@ -1,0 +1,13 @@
+# build output (tools/build_release.py)
+build/
+dist/
+
+# Python
+__pycache__/
+*.pyc
+
+# local only
+.claude/
+research/
+server/data/
+tools/.fake_player_key

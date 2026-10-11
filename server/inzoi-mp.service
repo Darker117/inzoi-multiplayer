@@ -1,0 +1,21 @@
+# systemd *user* service for the inZOI Multiplayer server (no root needed).
+# Install (Linux / Raspberry Pi): put inzoi_mp_server.py and this file in ~/inzoi-mp, then from that folder:
+#   mkdir -p ~/.config/systemd/user && cp inzoi-mp.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now inzoi-mp
+#   loginctl enable-linger "$USER"      # start at boot, even when nobody is logged in
+# Logs: journalctl --user -u inzoi-mp -f
+# Settings: edit ~/inzoi-mp/server.env (INZOI_MP_PORT, INZOI_MP_PASSWORD, INZOI_MP_MOTD, INZOI_MP_MAX_PLAYERS)
+
+[Unit]
+Description=inZOI Multiplayer server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=-%h/inzoi-mp/server.env
+ExecStart=/usr/bin/python3 %h/inzoi-mp/inzoi_mp_server.py --data %h/inzoi-mp/data
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

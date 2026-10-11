@@ -1,0 +1,610 @@
+{
+"FB1AppearanceSetting": {
+"appearanceage": [
+"AppearanceAge",
+"int32"
+],
+"authorname": [
+"AuthorName",
+"FString"
+],
+"body": [
+"Body",
+"FB1BodyDescription"
+],
+"bodyagetype": [
+"BodyAgeType",
+"EB1BodyAgeType"
+],
+"finalbody": [
+"FinalBody",
+"FB1BodyDescription"
+],
+"finalhead": [
+"FinalHead",
+"FB1HeadDescription"
+],
+"finalstyle": [
+"FinalStyle",
+"FB1StyleSetting"
+],
+"gender": [
+"Gender",
+"EB1GenderType"
+],
+"growthratio": [
+"GrowthRatio",
+"float"
+],
+"growthstep": [
+"GrowthStep",
+"EB1GrowthStep"
+],
+"head": [
+"Head",
+"FB1HeadDescription"
+],
+"outfit": [
+"Outfit",
+"FB1CharacterOutfit"
+],
+"stylingauthorname": [
+"StylingAuthorName",
+"FString"
+]
+},
+"FB1HeadDescription": {
+"authorname": [
+"AuthorName",
+"FString"
+],
+"baseheadid": [
+"BaseHeadId",
+"FName"
+],
+"facehairs": [
+"FaceHairs",
+"TMap<EB1FaceHairType,FB1FaceHairDescription>"
+],
+"faceshapeparameters": [
+"FaceShapeParameters",
+"TArray<float>"
+],
+"faceskinnyratio": [
+"FaceSkinnyRatio",
+"float"
+],
+"hair": [
+"Hair",
+"FB1HairDescription"
+],
+"iris": [
+"Iris",
+"FB1IrisDescription"
+],
+"lastpresetid": [
+"LastPresetId",
+"FName"
+],
+"makeup": [
+"Makeup",
+"TMap<FName,FB1MakeupDescription>"
+],
+"makeupauthorname": [
+"MakeupAuthorName",
+"FString"
+],
+"overrideskintone": [
+"OverrideSkinTone",
+"TSet<FName>"
+],
+"skin": [
+"Skin",
+"FB1SkinDescription"
+],
+"skinfeatures": [
+"SkinFeatures",
+"TMap<FName,FB1SkinFeatureDescription>"
+]
+},
+"FB1HairDescription": {
+"basehairid": [
+"BaseHairId",
+"FName"
+],
+"meshid": [
+"MeshId",
+"FName"
+],
+"overridevectorparameters": [
+"OverrideVectorParameters",
+"TMap<FName,FLinearColor>"
+],
+"scalarparameters": [
+"ScalarParameters",
+"TMap<FName,float>"
+],
+"vectorparameters": [
+"VectorParameters",
+"TMap<FName,FLinearColor>"
+]
+},
+"FB1SkinDescription": {
+"agingcontrolpoint": [
+"AgingControlPoint",
+"FB1OptionalFloat"
+],
+"bisskintonesetwithcolorid": [
+"bIsSkinToneSetWithColorId",
+"bool"
+],
+"colorapplymode": [
+"ColorApplyMode",
+"EB1SkinColorApplyMode"
+],
+"colorid": [
+"ColorId",
+"FName"
+],
+"scalarparameters": [
+"ScalarParameters",
+"TMap<FName,float>"
+],
+"skinid": [
+"SkinId",
+"FName"
+],
+"tone": [
+"Tone",
+"FLinearColor"
+]
+},
+"FB1OptionalFloat": {
+"hasvalue": [
+"HasValue",
+"bool"
+],
+"value": [
+"Value",
+"float"
+]
+},
+"FB1FaceHairDescription": {
+"facehairid": [
+"FaceHairId",
+"FName"
+],
+"facehairtype": [
+"FaceHairType",
+"EB1FaceHairType"
+],
+"scalarparameters": [
+"ScalarParameters",
+"TMap<FName,float>"
+],
+"vectorparameters": [
+"VectorParameters",
+"TMap<FName,FLinearColor>"
+]
+},
+"FB1MakeupDescription": {
+"makeupid": [
+"MakeupId",
+"FName"
+],
+"maskdata": [
+"MaskData",
+"TMap<EB1MakeupChannel,FB1MakeupChannelDesciption>"
+]
+},
+"FB1MakeupChannelDesciption": {
+"colorvalues": [
+"ColorValues",
+"TMap<FName,FLinearColor>"
+],
+"scalarvalues": [
+"ScalarValues",
+"TMap<FName,float>"
+]
+},
+"FB1IrisDescription": {
+"presetid": [
+"PresetId",
+"FName"
+],
+"scalarparameters": [
+"ScalarParameters",
+"TMap<FName,float>"
+],
+"vectorparameters": [
+"VectorParameters",
+"TMap<FName,FLinearColor>"
+]
+},
+"FB1BodyDescription": {
+"authorname": [
+"AuthorName",
+"FString"
+],
+"basebodymassratio": [
+"BaseBodyMassRatio",
+"float"
+],
+"basemusclemass": [
+"BaseMuscleMass",
+"float"
+],
+"bodydata": [
+"BodyData",
+"FB1CharacterBodyInfo"
+],
+"bodyhair": [
+"BodyHair",
+"FB1BodyHairDescription"
+],
+"bodymassratio": [
+"BodyMassRatio",
+"float"
+],
+"bodyshapeparameters": [
+"BodyShapeParameters",
+"TArray<float>"
+],
+"busemeshmerge": [
+"bUseMeshMerge",
+"bool"
+],
+"cachedshapeparameters": [
+"CachedShapeParameters",
+"TArray<FB1OptionalFloat>"
+],
+"footmesh": [
+"FootMesh",
+"FSoftObjectPath"
+],
+"muscledefinition": [
+"MuscleDefinition",
+"float"
+],
+"musclemass": [
+"MuscleMass",
+"float"
+],
+"overridebodymassratio": [
+"OverrideBodyMassRatio",
+"float"
+],
+"overridemesh": [
+"OverrideMesh",
+"FSoftObjectPath"
+],
+"overridemusclemass": [
+"OverrideMuscleMass",
+"float"
+],
+"toemesh": [
+"ToeMesh",
+"FSoftObjectPath"
+]
+},
+"FB1CharacterBodyInfo": {
+"appearancepresetid": [
+"AppearancePresetId",
+"FName"
+],
+"bmergebodymesh": [
+"bMergeBodyMesh",
+"bool"
+],
+"bodymesh": [
+"BodyMesh",
+"FSoftObjectPath"
+],
+"foottypemesh": [
+"FootTypeMesh",
+"TMap<EB1FootType,FSoftObjectPath>"
+],
+"softaniminstance": [
+"SoftAnimInstance",
+"FSoftClassPath"
+],
+"stockingfoottypemesh": [
+"StockingFootTypeMesh",
+"TMap<EB1FootType,FSoftObjectPath>"
+],
+"toemesh": [
+"ToeMesh",
+"FSoftObjectPath"
+]
+},
+"FB1BodyHairDescription": {
+"color": [
+"Color",
+"FLinearColor"
+],
+"scalarparameters": [
+"ScalarParameters",
+"TMap<FName,float>"
+]
+},
+"FB1CharacterOutfit": {
+"activestylelist": [
+"ActiveStyleList",
+"TArray<FB1StyleSetting>"
+],
+"authorname": [
+"AuthorName",
+"FString"
+],
+"basestyle": [
+"BaseStyle",
+"FB1StyleSetting"
+],
+"basestylecategory": [
+"BaseStyleCategory",
+"EB1OutfitCategory"
+],
+"categorizedstyles": [
+"CategorizedStyles",
+"TMap<EB1OutfitCategory,FB1CategorizedStyleData>"
+]
+},
+"FB1StyleSetting": {
+"bodyhair": [
+"BodyHair",
+"TOptional<FB1BodyHairDescription>"
+],
+"facehairs": [
+"FaceHairs",
+"TMap<EB1FaceHairType,FB1FaceHairDescription>"
+],
+"hair": [
+"Hair",
+"TOptional<FB1HairDescription>"
+],
+"iris": [
+"Iris",
+"TOptional<FB1IrisDescription>"
+],
+"makeup": [
+"Makeup",
+"TMap<FName,FB1MakeupDescription>"
+],
+"outfit": [
+"Outfit",
+"FB1OutfitSetting"
+],
+"reason": [
+"Reason",
+"EB1ChangeOutfitReason"
+],
+"skin": [
+"Skin",
+"TOptional<FB1SkinDescription>"
+],
+"skinfeatures": [
+"SkinFeatures",
+"TMap<FName,FB1SkinFeatureDescription>"
+],
+"stylecategory": [
+"StyleCategory",
+"EB1OutfitCategory"
+]
+},
+"FB1OutfitSetting": {
+"accessories": [
+"Accessories",
+"TMap<FName,FB1AccessoryDescription>"
+],
+"costumeid": [
+"CostumeId",
+"FName"
+],
+"garments": [
+"Garments",
+"TMap<FName,FB1GarmentDescription>"
+],
+"printedaccessories": [
+"PrintedAccessories",
+"TArray<FB1PrintedAccessoryDescription>"
+]
+},
+"FB1GarmentDescription": {
+"aitextureparameter": [
+"AiTextureParameter",
+"TMap<FName,FString>"
+],
+"bodyflags": [
+"BodyFlags",
+"int32"
+],
+"bodytextureparameters": [
+"BodyTextureParameters",
+"TMap<FName,FSoftObjectPath>"
+],
+"coveredflags": [
+"CoveredFlags",
+"int32"
+],
+"customgarmentname": [
+"CustomGarmentName",
+"FName"
+],
+"garmentid": [
+"GarmentId",
+"FName"
+],
+"garmentparts": [
+"GarmentParts",
+"TArray<FName>"
+],
+"garmenttype": [
+"GarmentType",
+"FName"
+],
+"meshid": [
+"MeshId",
+"FName"
+],
+"overridematerial": [
+"OverrideMaterial",
+"TArray<FSoftObjectPath>"
+],
+"scalarparameters": [
+"ScalarParameters",
+"TMap<int32,FB1GarmentScalarParameterInfo>"
+],
+"skinningtarget": [
+"SkinningTarget",
+"EB1MeshSkinningTarget"
+],
+"vectorparameters": [
+"VectorParameters",
+"TMap<FName,FLinearColor>"
+]
+},
+"FB1AccessoryDescription": {
+"accessoryid": [
+"AccessoryId",
+"FName"
+],
+"accessorymeshid": [
+"AccessoryMeshId",
+"FName"
+],
+"accessorytransformdata": [
+"AccessoryTransformData",
+"TMap<FName,FTransform>"
+],
+"accessorytype": [
+"AccessoryType",
+"FName"
+],
+"aitextureparameters": [
+"AiTextureParameters",
+"TMap<int32,FB1AccessoryAiTextureInfo>"
+],
+"scalarparameters": [
+"ScalarParameters",
+"TMap<int32,FB1AccessoryScalarParamterInfo>"
+],
+"socketnames": [
+"SocketNames",
+"TArray<FName>"
+],
+"vectorparameters": [
+"VectorParameters",
+"TMap<FName,FLinearColor>"
+]
+},
+"FB1PrintedAccessoryDescription": {
+"bhasunlockeditems": [
+"bHasUnlockedItems",
+"bool"
+],
+"printedaccessorydata": [
+"PrintedAccessoryData",
+"TMap<FName,FB1PrintedAccessoryData>"
+],
+"printedaccessoryname": [
+"PrintedAccessoryName",
+"FName"
+]
+},
+"FB1CategorizedStyleData": {
+"activeslotindex": [
+"ActiveSlotIndex",
+"int32"
+],
+"bautochangecategorizedstyle": [
+"bAutoChangeCategorizedStyle",
+"bool"
+],
+"brandomchangecategorizedstyle": [
+"bRandomChangeCategorizedStyle",
+"bool"
+],
+"lastrandompickday": [
+"LastRandomPickDay",
+"int32"
+],
+"lastrandomslotindex": [
+"LastRandomSlotIndex",
+"int32"
+],
+"representativeindex": [
+"RepresentativeIndex",
+"int32"
+],
+"styles": [
+"Styles",
+"TArray<FB1StyleSetting>"
+]
+},
+"FB1CustomizedCharacterInfo": {
+"ambitionid": [
+"AmbitionId",
+"FName"
+],
+"appearancesetting": [
+"AppearanceSetting",
+"FB1AppearanceSetting"
+],
+"categorizedstyles": [
+"CategorizedStyles",
+"TMap<EB1OutfitCategory,FB1CategorizedStyleData>"
+],
+"characteristics": [
+"Characteristics",
+"TArray<FName>"
+],
+"firstname": [
+"FirstName",
+"FText"
+],
+"genderidentitysetting": [
+"GenderIdentitySetting",
+"FB1GenderIdentitySetting"
+],
+"hopelifeid": [
+"HopeLifeId",
+"FName"
+],
+"lastname": [
+"LastName",
+"FText"
+],
+"personality": [
+"Personality",
+"FName"
+],
+"voice": [
+"Voice",
+"FB1VoiceSettings"
+]
+},
+"FB1VoiceSettings": {
+"pitchoffset": [
+"PitchOffset",
+"float"
+],
+"voiceid": [
+"VoiceId",
+"FName"
+]
+},
+"FB1GenderIdentitySetting": {
+"bromanticorientation": [
+"bRomanticOrientation",
+"bool"
+],
+"genderidentity": [
+"GenderIdentity",
+"EB1GenderIdentity"
+],
+"romancetargetlist": [
+"RomanceTargetList",
+"TSet<EB1GenderIdentity>"
+]
+}
+}

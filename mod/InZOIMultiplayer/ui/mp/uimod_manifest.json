@@ -1,0 +1,25 @@
+{
+	"name": "inZOI Multiplayer",
+	"version": "0.2.0",
+	"description": "Players online, chat, and joining friends.",
+	"author": "",
+	"entry": "index.html",
+	"display": {
+		"width": 1920,
+		"height": 1080,
+		"transparent": true,
+		"input_policy": "overlay"
+	},
+	"triggers": [
+		{
+			"id": "mp",
+			"type": "game_mode",
+			"mode": [
+				"TopView",
+				"ShoulderView",
+				"Vehicle"
+			],
+			"action": "show"
+		}
+	]
+}

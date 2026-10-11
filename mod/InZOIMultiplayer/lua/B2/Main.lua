@@ -1,0 +1,572 @@
+-- inZOI Multiplayer - B2 (simulation) puppet controller.
+--
+-- Other players' Zois live in this world as "puppets": real characters in their own household, autonomy off,
+-- walking where the remote player walks. The companion app (client/companion.py) drives this script through two
+-- mailbox modules it rewrites on disk; this script re-reads them a few times a second:
+--
+--   MPCmd   return { seq = <int>, bulk = <int>, ops = { {id = "<unique>", op = "...", ...}, ... } }
+--   MPBulk  return { seq = <int>, members = { [<player key>] = <FB1CustomizedCharacterInfo table>, ... } }
+--
+-- Ops (each runs once per id; the companion may repeat an op for a while so it can't be missed):
+--   spawn   {key, template, x, y, z, home_door?, home_site?}   create the puppet for player `key` from MPBulk
+--   trail   {key, pts = {{n, x, y, z, yaw}, ...}}              newest positions of that player, n = sample number
+--   hide    {key, on}                                          remote player is elsewhere (other city, loading...)
+--   admit   {key, door, site}                                  let the puppet through a lot's doors like a guest
+--   despawn {key}
+--   debug ops: walk {entity, x, y, z}, status {entity}, reset {entity}, probe {entity, r}
+--
+-- Everything learned the hard way (see project notes): walks use ClickMove_NonCancelable with no target, redirects
+-- need a Clear-cancel and the new order on a later tick, unreachable/occupied destinations are dropped silently,
+-- puppets need the knock-door guest privilege to enter homes, and new characters must be switched from
+-- TimelineSimulateOnly to Simulate|GameSpawned by hand.
+
+local M = {}
+local P = "[mp] "
+local CMD = table.concat({ "MP", "Cmd" })      -- built at runtime: the validator only allows static module names
+local BULK = table.concat({ "MP", "Bulk" })
+
+local S = { clock = 0, poll = 0, seq = nil, bulkSeq = nil, members = {}, done = {}, doneOrder = {} }
+local find_me
+local PUPPETS = {}      -- key -> {id, trail = {...}, dest, lastOrderT, pending, hidden}
+
+local INSTANCE = string.format("%06d", math.random(0, 999999))     -- tells the companion when it's a fresh controller
+local REPORTS = 0
+
+-- Reports reach the companion through the B1 script bound to the player's Zoi (see B1/MPClient.lua).
+local function report(kind, text)
+    if not S.me then return end
+    REPORTS = REPORTS + 1
+    local msg = string.format("%s %d %s %s", INSTANCE, REPORTS, kind, text or "")
+    pcall(function() inzoi.message.send_to_client(S.me, "mp", msg) end)
+end
+
+local function log(s)
+    print(P .. string.format("%.2f ", S.clock) .. s)
+    report("log", s)
+end
+
+local function eid(n)
+    local id = INZOI.FB1EntityId()
+    id.Value = n
+    return id
+end
+
+local function em() return inzoi.getB2Manager("FB2EntityManager") end
+local function char(n) local m = em(); return m:FindCharacter(eid(n)) end
+local function cli(cmd) return inzoi.cli.execute(cmd) end
+local function dist2(ax, ay, bx, by) return math.sqrt((ax - bx) ^ 2 + (ay - by) ^ 2) end
+
+-- ---------------------------------------------------------------- data -> engine struct builder
+-- Rebuilds engine structs from the typed tables produced by client/lua_data.py.
+local ENUMS, BUILD_ERRS = {}, {}
+
+local function enum(name, v)
+    if type(v) == "number" then return v end
+    local e = inzoi[name] or INZOI[name]
+    if not e then error("no enum " .. name) end
+    local key = tostring(v)
+    local cache = ENUMS[name]
+    if cache and cache[key] ~= nil then return cache[key] end
+    for _, cand in ipairs({ key, key:sub(1, 1):upper() .. key:sub(2), key:upper(), key:lower() }) do
+        local ok, val = pcall(function() return e[cand] end)
+        if ok and val ~= nil then
+            ENUMS[name] = cache or {}
+            ENUMS[name][key] = val
+            return val
+        end
+    end
+    error("enum " .. name .. " has no value " .. key)
+end
+
+local build, fill
+build = function(v, path)
+    if type(v) ~= "table" then return v end
+    if v.__e then return enum(v.__e, v.v) end
+    if v.__o then return build(v.__o, path) end
+    if v.__s then
+        local okI, cls = pcall(function() return INZOI[v.__s] end)
+        if not okI or not cls then
+            local okU, ucls = pcall(function() return UE[v.__s] end)
+            cls = okU and ucls or nil
+        end
+        if not cls then error("no struct type " .. v.__s) end
+        local s = cls()
+        fill(s, v, path)
+        return s
+    end
+    error("cannot build " .. path)
+end
+
+fill = function(dst, t, path)
+    for k, v in pairs(t) do
+        if k ~= "__s" then
+            local ok, err = pcall(function()
+                if type(v) == "table" and v.__a then
+                    local arr = dst[k]
+                    arr:Clear()
+                    for i, e in ipairs(v.i) do arr:Add(build(e, path .. "." .. k .. "[" .. i .. "]")) end
+                    dst[k] = arr
+                elseif type(v) == "table" and v.__set then
+                    local set = dst[k]
+                    set:Clear()
+                    for _, e in ipairs(v.i) do set:Add(build(e, path .. "." .. k)) end
+                    dst[k] = set
+                elseif type(v) == "table" and v.__m then
+                    local m = dst[k]
+                    m:Clear()
+                    for _, kv in ipairs(v.i) do m:Add(build(kv[1], path .. "." .. k), build(kv[2], path .. "." .. k)) end
+                    dst[k] = m
+                elseif type(v) == "table" and v.__s then
+                    local sub = dst[k]
+                    fill(sub, v, path .. "." .. k)
+                    dst[k] = sub
+                else
+                    dst[k] = build(v, path .. "." .. k)
+                end
+            end)
+            if not ok then BUILD_ERRS[#BUILD_ERRS + 1] = path .. "." .. k .. ": " .. tostring(err) end
+        end
+    end
+end
+
+local function build_report()
+    local n, shown = #BUILD_ERRS, {}
+    for i = 1, math.min(n, 4) do shown[i] = BUILD_ERRS[i] end
+    BUILD_ERRS = {}
+    return n == 0 and "ok" or string.format("%d field errors: %s", n, table.concat(shown, " | "))
+end
+
+-- ---------------------------------------------------------------- movement primitives
+local IC_CANCEL_CLEAR = function() return inzoi.EB1InteractionCancelReason.Clear end
+
+local function interaction(c) return c:GetComponent(inzoi.EB2ComponentType.Interaction) end
+
+local function is_walking(c)
+    return INZOI.FB2InteractionComponent.IsPlayingInteraction(interaction(c))
+end
+
+-- Queue a walk to a floor point. Returns the queue result (37 = accepted; dropped orders still return 37).
+local function order_walk(c, x, y, z, bag)
+    local dest = UE.FVector(x, y, z - 77)
+    return INZOI.FB2InteractionComponent.AddInteractionQueueByParam(interaction(c), INZOI.FB1EntityId(), dest,
+        bag or "ClickMove_NonCancelable", inzoi.EB1InteractionPlayReason.None, true, false, "mp_puppet", true, false)
+end
+
+local function cancel_walk(c)
+    local ic = interaction(c)
+    local IC = INZOI.FB2InteractionComponent
+    IC.TryCancelInteraction(ic, IC.GetCurrentInteractionQueueId(ic), IC_CANCEL_CLEAR(), "mp_redirect")
+end
+
+local function freeze(id)
+    local am = inzoi.getB2Manager("FB2AutonomyOptionManager")
+    local T = inzoi.EB1AutonomyOptionType
+    am:SetIndividualToggleOption(eid(id), T.AutonomyEnable, false)      -- no free will
+    am:SetIndividualToggleOption(eid(id), T.FollowSchedule, false)      -- no wandering off to work/school
+    am:SetIndividualToggleOption(eid(id), T.FreezeStat, true)           -- needs don't decay: never hungry or tired
+end
+
+local function teleport(id, x, y, z)
+    cli(string.format("movement.teleport entity_id=%d x=%f y=%f z=%f", id, x, y, z))
+end
+
+-- Turn on the spot to a world yaw (degrees).
+local function face(c, yaw, how)
+    local rot = UE.FRotator(0, yaw, 0)
+    if how == "simul" then
+        c:SetRotationOnlySimul(rot)
+    elseif how == "look" then
+        local l = c:GetLocation()
+        local r = math.rad(yaw)
+        c:StartLookAtLoc(UE.FVector(l.X + 300 * math.cos(r), l.Y + 300 * math.sin(r), l.Z + 60), inzoi.EB1LookAtReason.Script)
+    else
+        c:Teleport(c:GetLocation(), rot, false, false, false, false, true, inzoi.EB1LoadingContext.None,
+            inzoi.EB1TeleportReason.None)
+    end
+end
+
+local function yaw_gap(a, b)
+    local d = (a - b) % 360
+    return d > 180 and 360 - d or d
+end
+
+-- The object a remote player is using, found again in this world: same table id, about the same spot, on the site
+-- the puppet is standing on (public places are identical in every game).
+local function find_object(c, table_id, x, y, z)
+    local m = em()
+    local site = m:FindSite(c:GetLocatedSiteId())
+    if not site then return nil end
+    local objs = site:GetObjects()
+    local best, bestD = nil, 150
+    for i = 1, objs:Num() do
+        local id = objs:Get(i)
+        local o = m:FindGameObject(id)
+        if o and tostring(o:GetObjectTableId()) == table_id then
+            local l = o:GetLocation()
+            local d = math.sqrt((l.X - x) ^ 2 + (l.Y - y) ^ 2 + (l.Z - z) ^ 2)
+            if d < bestD then best, bestD = id.Value, d end
+        end
+    end
+    return best
+end
+
+local function current_bag(c)
+    local ic = interaction(c)
+    local ok, q = pcall(INZOI.FB2InteractionComponent.GetCurrentInteractionBagId, ic)
+    return ok and tostring(q) or nil
+end
+
+-- ---------------------------------------------------------------- puppets
+local function spawn_puppet(op)
+    local member = S.members[op.key]
+    if not member then error("no profile in MPBulk for " .. tostring(op.key)) end
+    local old = PUPPETS[op.key]
+    if old then                                         -- rebuilding (their Zoi changed): the old one goes
+        pcall(cli, string.format("zoi.destroy entity_id=%d", old.id))
+        PUPPETS[op.key] = nil
+    end
+    local m = em()
+    local tpl = char(op.template)
+    local attr = tpl:MakeCharacterAttribute()          -- template supplies meshes/skeleton for this gender+age
+    local info = INZOI.FB1CustomizedHouseholdInfo()
+    info.HouseholdName = "MP " .. op.key
+    info.CreateReason = inzoi.EB2EntityCreateReason.UserCreate
+    local mem = INZOI.FB1CustomizedCharacterInfo()
+    mem.AppearanceSetting = attr.AppearanceSetting
+    mem.Personality = attr.Personality
+    mem.Characteristics = attr.Characteristics
+    mem.Voice = attr.Voice
+    mem.GenderIdentitySetting = attr.GenderIdentitySetting
+    mem.CategorizedStyles = attr.CategorizedStyles
+    fill(mem, member, "Member")
+    mem.CategorizedStyles = mem.AppearanceSetting.Outfit.CategorizedStyles
+    local built = build_report()
+    info.HouseholdMemberCustomizedInfo:Add(mem)
+    local hh = m:RegisterHousehold(tpl.LocatedCityName, info)
+    local id = m:FindHousehold(hh):GetHouseholdMembers():Get(1).Value
+    local c = char(id)
+    -- New characters exist only as background simulation until switched into the world by hand.
+    c:SetLocationOnlySimul(UE.FVector(op.x, op.y, op.z))
+    local me = char(op.near or op.template)
+    c:SetLocatedSiteId(me:GetLocatedSiteId())
+    local ES, R = inzoi.EB2EntityState, inzoi.EB2EntityStateChangeReason
+    c:RemoveEntityState(ES.TimelineSimulateOnly, R.RequestSpawn)
+    c:AddEntityState(ES.Simulate, R.RequestSpawn)
+    c:AddEntityState(ES.GameSpawned, R.RequestSpawn)
+    freeze(id)
+    cli(string.format("life_and_death.stop_aging entity_id=%d enable=true", id))     -- a puppet never ages or dies here
+    cli(string.format("life_and_death.immortal entity_id=%d enable=true", id))
+    teleport(id, op.x, op.y, op.z)
+    if op.home_door and op.home_site then
+        c:GrantKnockDoorVisitSitePrivilege(eid(op.home_door), eid(op.home_site))
+    end
+    PUPPETS[op.key] = { id = id, trail = {}, dest = nil, lastOrderT = -10, pending = nil, hidden = false }
+    report("spawned", op.key .. " " .. id)
+    return string.format("spawned %s as %d (household %d), build %s", op.key, id, hh.Value, built)
+end
+
+local function despawn_puppet(op)
+    local p = PUPPETS[op.key]
+    if not p then return "no puppet " .. tostring(op.key) end
+    cli(string.format("zoi.destroy entity_id=%d", p.id))
+    PUPPETS[op.key] = nil
+    report("despawned", op.key)
+    return "despawned " .. op.key
+end
+
+local function add_trail(op)
+    local p = PUPPETS[op.key]
+    if not p then return nil end
+    for _, pt in ipairs(op.pts or {}) do                -- batches overlap; only take samples we haven't seen
+        if pt[1] > (p.lastN or -1) then
+            p.lastN = pt[1]
+            local last = p.trail[#p.trail]
+            if not last or dist2(last.x, last.y, pt[2], pt[3]) > 5 then
+                p.trail[#p.trail + 1] = { t = S.clock, x = pt[2], y = pt[3], z = pt[4], yaw = pt[5] }
+            elseif pt[5] and yaw_gap(last.yaw or pt[5], pt[5]) > 10 then
+                last.yaw, last.t = pt[5], S.clock      -- turned on the spot
+            end
+        end
+    end
+    while #p.trail > 120 do table.remove(p.trail, 1) end
+    return nil      -- trails are too frequent to log
+end
+
+-- Follow logic: head for the player's newest position. Redirecting a walk costs a short stop, so only re-aim when
+-- the player has moved REAIM cm away from where we're headed (or we've stopped); sprint when far behind;
+-- teleport when hopelessly behind (other side of town, loading screen...).
+local REAIM, SPRINT, TELEPORT, MIN_GAP = 300, 800, 1500, 0.4
+local ACT_LEAVE = 600       -- while copying an action, only a remote player this far from the puppet means "they left"
+local FACE_GAP, FACE_EVERY = 25, 1.5
+
+local function start_act(c, p)
+    local a = p.actQueued
+    p.actQueued = nil
+    if a.target and a.target > 0 then
+        cli(string.format("interaction.execute entity_id=%d interaction_bag_id=%s target_entity_id=%d insert_front=true",
+            p.id, a.bag, a.target))
+    else
+        cli(string.format("interaction.execute entity_id=%d interaction_bag_id=%s insert_front=true", p.id, a.bag))
+    end
+    p.act.started = S.clock
+end
+
+local function drive(key, p, dt)
+    local c = char(p.id)
+    if p.pending then                                   -- second half of a redirect: the old walk is gone now
+        p.pending.t = p.pending.t + dt
+        if not is_walking(c) or p.pending.t > 0.3 then
+            order_walk(c, p.pending.x, p.pending.y, p.pending.z, p.pending.bag)
+            p.pending = nil
+        end
+        return
+    end
+    if p.actQueued then                                 -- an action waits for the cancelled walk to clear
+        p.actQueued.t = p.actQueued.t + dt
+        if not is_walking(c) or p.actQueued.t > 0.3 then start_act(c, p) end
+        return
+    end
+    if #p.trail == 0 or p.hidden or S.clock - p.lastOrderT < MIN_GAP then return end
+    local pick = p.trail[#p.trail]
+    local me = c:GetLocation()
+    local far = dist2(me.X, me.Y, pick.x, pick.y)
+    if p.act then
+        -- Doing what the remote player does (the interaction walks the puppet to the object/person itself): stay on
+        -- it until the action ends (act_stop) or they're clearly somewhere else.
+        if far < ACT_LEAVE then return end
+        p.act = nil
+    end
+    if far > TELEPORT then
+        teleport(p.id, pick.x, pick.y, pick.z)
+        p.lastOrderT, p.dest = S.clock, pick
+        log(string.format("%s teleported (%.0f m behind)", key, far / 100))
+        return
+    end
+    local walking = is_walking(c)
+    -- A dropped order (destination occupied or unreachable) leaves the puppet standing: retry 80 cm shorter, once.
+    if p.dest and not walking and not p.retried and S.clock - p.lastOrderT > 1.0 and p.orderFrom
+        and dist2(me.X, me.Y, p.orderFrom.x, p.orderFrom.y) < 10 and dist2(me.X, me.Y, p.dest.x, p.dest.y) > 120 then
+        local d = dist2(me.X, me.Y, p.dest.x, p.dest.y)
+        local k = (d - 80) / d
+        p.retried, p.lastOrderT = true, S.clock
+        order_walk(c, me.X + (p.dest.x - me.X) * k, me.Y + (p.dest.y - me.Y) * k, p.dest.z)
+        return
+    end
+    if math.abs(me.Z - pick.z) > 150 then               -- another floor: never "arrived", walk there (stairs)
+        if not walking and p.dest == pick and S.clock - p.lastOrderT > 3 then
+            teleport(p.id, pick.x, pick.y, pick.z)      -- the walk was refused: go straight there
+            p.lastOrderT = S.clock
+            log(string.format("%s teleported to their floor", key))
+            return
+        end
+        far = math.max(far, 300)
+    end
+    if far < 60 or (not walking and p.dest == pick and far < 300) then
+        -- Arrived (or as close as it gets: the spot can be taken): also face the way they face, since a walk ends
+        -- facing the walking direction.
+        if not walking and far < 300 and pick.yaw and S.clock - (p.facedT or -10) > FACE_EVERY
+            and S.clock - pick.t > 0.5 and yaw_gap(c:GetRotation().Yaw, pick.yaw) > FACE_GAP then
+            p.facedT = S.clock
+            face(c, pick.yaw, p.faceHow)
+        end
+        return
+    end
+    local stale = not p.dest or dist2(p.dest.x, p.dest.y, pick.x, pick.y) > REAIM
+    if walking and not stale then return end
+    if not walking and p.dest == pick then return end
+    local bag = far > SPRINT and "ClickMove_Sprint_Close" or nil
+    p.lastOrderT, p.dest, p.retried, p.orderFrom = S.clock, pick, false, { x = me.X, y = me.Y }
+    if walking then
+        cancel_walk(c)
+        p.pending = { x = pick.x, y = pick.y, z = pick.z, bag = bag, t = 0 }
+    else
+        order_walk(c, pick.x, pick.y, pick.z, bag)
+    end
+end
+
+-- After a reload (of this script or the whole game) find our puppets again by their "MP <key>" households.
+local function rediscover()
+    local m = em()
+    local all = m:GetAllEntities(inzoi.EB2EntityType.Household)
+    local found = 0
+    for i = 1, all:Num() do
+        local ok, err = pcall(function()
+            local hh = m:FindHousehold(all:Get(i):GetEntityId())
+            local name = tostring(hh:GetHouseholdName())
+            local key = name:match("^MP (p%x+)$")
+            local members = hh:GetHouseholdMembers()
+            if key and members:Num() > 0 and not PUPPETS[key] then
+                PUPPETS[key] = { id = members:Get(1).Value, trail = {}, lastOrderT = -10, hidden = false }
+                found = found + 1
+            end
+        end)
+    end
+    return found
+end
+
+-- ---------------------------------------------------------------- mailbox
+local OPS = {
+    spawn = spawn_puppet,
+    despawn = despawn_puppet,
+    trail = add_trail,
+    hide = function(op)
+        local p = PUPPETS[op.key]
+        if not p then return nil end
+        p.hidden = op.on ~= false
+        char(p.id):SetCharacterHiddenInGame(p.hidden, "mp_away")
+        return string.format("%s %s", op.key, p.hidden and "hidden" or "shown")
+    end,
+    admit = function(op)
+        local p = PUPPETS[op.key]
+        if not p then return nil end
+        char(p.id):GrantKnockDoorVisitSitePrivilege(eid(op.door), eid(op.site))
+        return "admitted " .. op.key .. " to site " .. tostring(op.site)
+    end,
+    -- The remote player started an interaction: {key, bag, target?} (a character here) or {key, bag, obj, ox, oy, oz}
+    -- (an object, found again by table id near that spot). x, y = where the remote player stood when it started.
+    act = function(op)
+        local p = PUPPETS[op.key]
+        if not p then return nil end
+        local c = char(p.id)
+        local target = op.target
+        if op.obj then
+            target = find_object(c, op.obj, op.ox, op.oy, op.oz)
+            if not target then                          -- something only their world has (a plate they cooked...)
+                if op.anim then cli(string.format("motion.play entity_id=%d anim_id=%s", p.id, op.anim)) end
+                return string.format("%s: no %s here for %s%s", op.key, op.obj, op.bag, op.anim and ", showing the motion" or "")
+            end
+        end
+        p.pending = nil
+        if is_walking(c) or p.act then cancel_walk(c) end
+        p.act = { bag = op.bag, x = op.x, y = op.y }
+        p.actQueued = { bag = op.bag, target = target, t = 0 }
+        return string.format("%s does %s%s", op.key, op.bag, target and (" on " .. target) or "")
+    end,
+    act_stop = function(op)
+        local p = PUPPETS[op.key]
+        if not p or not p.act then return nil end
+        local c = char(p.id)
+        if current_bag(c) == p.act.bag then cli("interaction.cancel entity_id=" .. p.id) end
+        p.act, p.actQueued = nil, nil
+        return op.key .. " stopped"
+    end,
+    -- A motion with nothing to mirror it with (an emote, a pose): just play it.
+    anim = function(op)
+        local p = PUPPETS[op.key]
+        if not p then return nil end
+        local cmd = string.format("motion.play entity_id=%d anim_id=%s", p.id, op.anim)
+        if op.pos then cmd = cmd .. string.format(" position=%.2f", op.pos) end
+        cli(cmd)
+        return nil
+    end,
+    outfit = function(op)
+        local p = PUPPETS[op.key]
+        if not p then return nil end
+        cli(string.format("appearance.set_outfit_category entity_id=%d category=%s", p.id, op.category))
+        return op.key .. " wears " .. op.category
+    end,
+    face = function(op)                                 -- debug: turn a puppet or any Zoi
+        local p = op.key and PUPPETS[op.key]
+        local c = char(p and p.id or op.entity)
+        if p and op.how then p.faceHow = op.how end
+        face(c, op.yaw, op.how)
+        return string.format("face %s -> %.0f (now %.0f)", op.how or "tp", op.yaw, c:GetRotation().Yaw)
+    end,
+    -- debugging
+    walk = function(op) return "walk " .. tostring(order_walk(char(op.entity), op.x, op.y, op.z, op.bag)) end,
+    freeze = function(op) freeze(op.entity); return "froze " .. op.entity end,
+    reset = function(op) return "reset " .. tostring(select(2, cli("movement.reset_zoi entity_id=" .. op.entity .. " teleport=false"))) end,
+    status = function(op)
+        local out = {}
+        for key, p in pairs(PUPPETS) do
+            local l = char(p.id):GetLocation()
+            out[#out + 1] = string.format("%s=%d@%.0f,%.0f trail %d%s", key, p.id, l.X, l.Y, #p.trail, p.hidden and " hidden" or "")
+        end
+        return "puppets: " .. (#out > 0 and table.concat(out, "; ") or "none")
+    end,
+}
+
+-- The Zoi the player controls: reports are addressed to it. Re-checked now and then (the player can switch Zois).
+function find_me()
+    local ok, _, data = cli("entity.get_possessed")
+    local me = ok and tonumber(tostring(data):match('"entity_id"%s*:%s*(%d+)'))
+    if me and me > 0 then S.me = me end
+end
+
+local function remember(id)
+    S.done[id] = true
+    S.doneOrder[#S.doneOrder + 1] = id
+    if #S.doneOrder > 500 then S.done[table.remove(S.doneOrder, 1)] = nil end
+end
+
+local function load(name)
+    pcall(function() package.loaded[name] = nil end)
+    local ok, box = pcall(require, name)
+    return ok and type(box) == "table" and box or nil
+end
+
+local function poll()
+    local box = load(CMD)
+    if not box or box.seq == S.seq then return end
+    S.seq = box.seq
+    if box.bulk and box.bulk ~= S.bulkSeq then
+        local bulk = load(BULK)
+        if bulk and bulk.seq == box.bulk then
+            S.bulkSeq = bulk.seq
+            S.members = bulk.members or {}
+        end
+    end
+    for _, op in ipairs(box.ops or {}) do
+        if not (op.id and S.done[op.id]) then
+            local f = OPS[op.op]
+            local ok, res = pcall(f or function() error("unknown op " .. tostring(op.op)) end, op)
+            if ok or op.op ~= "spawn" or S.members[op.key] then      -- a spawn without its profile yet is retried
+                if op.id then remember(op.id) end
+            end
+            if res ~= nil or not ok then
+                log(string.format("%s: %s", tostring(op.op), ok and tostring(res) or ("ERR " .. tostring(res))))
+            end
+        end
+    end
+end
+
+-- ---------------------------------------------------------------- lifecycle
+function M.on_begin(self)
+    require("Objects.B2Entity")
+    require("Objects.B2Actor")
+    require("Objects.B2Character")
+    require("Components.B2CharacterMovementComponent")
+    require("Systems.B2AutonomyOptionManager")
+    require("Objects.B2Site")
+    require("Objects.B2GameObject")
+    find_me()
+    local box = load(CMD)
+    S.seq = box and box.seq or nil          -- whatever is already in the mailbox was meant for a previous session
+    local ok, n = pcall(rediscover)
+    log("puppet controller up; " .. (ok and (n .. " puppet(s) found from before") or ("rediscover ERR " .. tostring(n))))
+end
+
+function M.on_tick(self, dt)
+    dt = dt or 0
+    S.clock = S.clock + dt
+    S.poll = S.poll + dt
+    if S.poll >= 0.1 then
+        S.poll = 0
+        local ok, err = pcall(poll)
+        if not ok then log("poll ERR " .. tostring(err)) end
+    end
+    S.beat = (S.beat or 0) + dt
+    if S.beat >= 2 then                                 -- heartbeat: the companion knows the mod is loaded and alive
+        S.beat = 0
+        pcall(find_me)
+        local list = {}
+        for key, p in pairs(PUPPETS) do list[#list + 1] = key .. "=" .. p.id end
+        report("up", table.concat(list, ","))
+    end
+    for key, p in pairs(PUPPETS) do
+        local ok, err = pcall(drive, key, p, dt)
+        if not ok then log(key .. " drive ERR " .. tostring(err)) end
+    end
+end
+
+return M

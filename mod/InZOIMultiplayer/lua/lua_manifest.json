@@ -1,0 +1,7 @@
+{
+	"settings": { "auto_require": false },
+	"bindings": {
+		"B1": [ { "type": "Zoi", "key": "ResidenceFamily", "script": "MPClient" } ],
+		"B2": []
+	}
+}

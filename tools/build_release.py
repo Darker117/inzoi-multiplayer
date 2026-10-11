@@ -1,0 +1,159 @@
+"""Build what friends download: one program, "inZOI Multiplayer.exe" (play, host, or both; the game mod is inside it),
+and a zip with that exe, the README and the server script for a Raspberry Pi / Linux box.
+
+    python tools/build_release.py
+
+The first run creates build/venv with PyInstaller in it (needs the internet once). Output in dist/:
+    inZOI-Multiplayer.exe               the program on its own
+    inZOI-Multiplayer-<version>.zip     inZOI Multiplayer.exe, README.txt, server for Raspberry Pi or Linux/
+"""
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import zipfile
+import zlib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+BUILD = ROOT / "build"
+DIST = ROOT / "dist"
+VENV_PY = BUILD / "venv" / "Scripts" / "python.exe"
+EXE_NAME = "inZOI Multiplayer"
+LINUX_SERVER = ["inzoi_mp_server.py", "PROTOCOL.md", "inzoi-mp.service"]
+SKIP_MOD = {"MPCmd.lua", "MPBulk.lua", "inject.json", "__pycache__", "out"}
+
+BG, BLUE, MINT = (22, 34, 56), (90, 168, 240), (127, 209, 185)      # the in-game panel's colours
+
+
+def pyinstaller() -> Path:
+    if not VENV_PY.exists():
+        subprocess.run([sys.executable, "-m", "venv", str(BUILD / "venv")], check=True)
+        subprocess.run([str(VENV_PY), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "pyinstaller"],
+                       check=True)
+    return VENV_PY
+
+
+# ---------------------------------------------------------------------------------------------------- icon
+def _person(x, y, hx, hy, head, body, grow=0.0) -> bool:
+    """A bust: round head at (hx, hy), shoulders below it (cut off by the icon's edge)."""
+    if (x - hx) ** 2 + (y - hy) ** 2 <= (head + grow) ** 2:
+        return True
+    bx, by = hx, hy + head + 22 + body
+    return ((x - bx) / (body + 8 + grow)) ** 2 + ((y - by) / (body + grow)) ** 2 <= 1
+
+
+def _shade(x, y):
+    """Colour at a point of the 256x256 icon (None = transparent): two friends side by side."""
+    r = 56                                                      # rounded square, 8 px margin
+    cx, cy = min(max(x, 8 + r), 248 - r), min(max(y, 8 + r), 248 - r)
+    if (x - cx) ** 2 + (y - cy) ** 2 > r * r:
+        return None
+    if _person(x, y, 160, 112, 34, 62):
+        return MINT
+    if _person(x, y, 160, 112, 34, 62, grow=10):               # a gap between the two
+        return BG
+    if _person(x, y, 96, 84, 30, 54):
+        return BLUE
+    return BG
+
+
+def _png(size: int, rgba: bytes) -> bytes:
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    rows = b"".join(b"\0" + rgba[y * size * 4:(y + 1) * size * 4] for y in range(size))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b""))
+
+
+def make_icon(path: Path):
+    images = []
+    for size, ss in ((256, 2), (64, 3), (48, 4), (32, 4), (16, 4)):
+        px = bytearray()
+        for y in range(size):
+            for x in range(size):
+                r = g = b = n = 0
+                for j in range(ss):
+                    for i in range(ss):
+                        c = _shade((x + (i + 0.5) / ss) * 256 / size, (y + (j + 0.5) / ss) * 256 / size)
+                        if c:
+                            r, g, b, n = r + c[0], g + c[1], b + c[2], n + 1
+                px += bytes((r // n, g // n, b // n, 255 * n // (ss * ss))) if n else b"\0\0\0\0"
+        images.append((size, _png(size, bytes(px))))
+    path.with_suffix(".png").write_bytes(images[0][1])
+    entries, blobs, offset = b"", b"", 6 + 16 * len(images)
+    for size, data in images:
+        entries += struct.pack("<BBBBHHII", size % 256, size % 256, 0, 0, 1, 32, len(data), offset + len(blobs))
+        blobs += data
+    path.write_bytes(struct.pack("<HHH", 0, 1, len(images)) + entries + blobs)
+
+
+# ---------------------------------------------------------------------------------------------------- exe
+VERSION_INFO = """VSVersionInfo(
+  ffi=FixedFileInfo(filevers=(@T@, 0), prodvers=(@T@, 0), mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1,
+                    subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('040904B0', [
+      StringStruct('CompanyName', 'inZOI Multiplayer (fan-made)'),
+      StringStruct('FileDescription', 'inZOI Multiplayer'),
+      StringStruct('FileVersion', '@V@'),
+      StringStruct('InternalName', 'inZOI Multiplayer'),
+      StringStruct('LegalCopyright', 'Fan-made mod, not affiliated with KRAFTON'),
+      StringStruct('OriginalFilename', 'inZOI Multiplayer.exe'),
+      StringStruct('ProductName', 'inZOI Multiplayer'),
+      StringStruct('ProductVersion', '@V@')])]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+"""
+
+
+def build_exe(version: str) -> Path:
+    stage = BUILD / "stage"
+    if stage.exists():
+        shutil.rmtree(stage)
+    shutil.copytree(ROOT / "mod" / "InZOIMultiplayer", stage / "mod" / "InZOIMultiplayer",
+                    ignore=lambda d, names: [n for n in names if n in SKIP_MOD])
+    icon, vfile = BUILD / "icon.ico", BUILD / "version_info.txt"
+    make_icon(icon)
+    nums = ", ".join((version.split(".") + ["0", "0"])[:3])
+    vfile.write_text(VERSION_INFO.replace("@T@", nums).replace("@V@", version), "utf-8")
+    subprocess.run([
+        str(pyinstaller()), "-m", "PyInstaller", "--noconfirm", "--clean", "--log-level", "WARN",
+        "--onefile", "--console", "--name", EXE_NAME, "--icon", str(icon), "--version-file", str(vfile),
+        "--paths", str(ROOT / "client"), "--paths", str(ROOT / "server"),
+        "--add-data", f"{stage / 'mod'}{os.pathsep}mod",
+        "--add-data", f"{ROOT / 'client' / 'struct_cache.json'}{os.pathsep}.",
+        "--exclude-module", "tkinter", "--exclude-module", "unittest", "--exclude-module", "pydoc",
+        "--distpath", str(BUILD / "exe"), "--workpath", str(BUILD / "pyinstaller"), "--specpath", str(BUILD),
+        str(ROOT / "client" / "launcher.py")], check=True)
+    return BUILD / "exe" / f"{EXE_NAME}.exe"
+
+
+def main():
+    version = re.search(r'VERSION = "([^"]+)"', (ROOT / "client" / "companion.py").read_text("utf-8")).group(1)
+    exe = build_exe(version)
+    name = f"inZOI-Multiplayer-{version}"
+    out = DIST / name
+    if out.exists():
+        shutil.rmtree(out)
+    linux = out / "server for Raspberry Pi or Linux"
+    linux.mkdir(parents=True)
+    shutil.copy2(exe, out / exe.name)
+    shutil.copy2(ROOT / "release" / "README.txt", out / "README.txt")
+    for f in LINUX_SERVER:
+        shutil.copy2(ROOT / "server" / f, linux / f)
+    zpath = DIST / f"{name}.zip"
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(out.rglob("*")):
+            if f.is_file():
+                z.write(f, Path(name) / f.relative_to(out))
+    shutil.copy2(exe, DIST / "inZOI-Multiplayer.exe")
+    print(f"{DIST / 'inZOI-Multiplayer.exe'}  ({exe.stat().st_size // 1024} KB)")
+    print(f"{zpath}  ({zpath.stat().st_size // 1024} KB)")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

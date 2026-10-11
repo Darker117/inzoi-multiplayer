@@ -1,0 +1,5 @@
+{
+  "apps": [
+    { "name": "mp", "enabled": true }
+  ]
+}
