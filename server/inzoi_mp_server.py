@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -28,11 +30,14 @@ import signal
 import time
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PROTOCOL = 1
 MAX_LINE = 32 * 1024 * 1024        # house snapshots can be large
 PING_EVERY = 15                    # seconds between keepalives
 TIMEOUT = 45                       # drop a client that sent nothing for this long
+CHUNK = 512 * 1024                 # mod file transfer: bytes per blob_get answer
+SHA = re.compile(r"[0-9a-f]{64}")
+FILE_MESSAGES = {"blob_check", "blob_put", "blob_get", "ping", "pong"}
 
 log = logging.getLogger("inzoi-mp")
 
@@ -46,7 +51,8 @@ class Store:
 
     def __init__(self, root: Path):
         self.root = root
-        (root / "houses").mkdir(parents=True, exist_ok=True)
+        for sub in ("houses", "mods", "blobs"):
+            (root / sub).mkdir(parents=True, exist_ok=True)
         self.players_file = root / "players.json"
         self.players: dict[str, dict] = self._load(self.players_file, {})
 
@@ -104,6 +110,42 @@ class Store:
                 out.append(d["meta"])
         return out
 
+    # Mods: each player's list of enabled mods (with a sha256 per file), and the files themselves as blobs named by
+    # their sha256, so a file several players have is stored once.
+    mods_changed = 0                   # bumped on every set_mods, so the server knows its cached mod set is stale
+
+    def set_mods(self, pid: str, name: str, mods: list) -> None:
+        self._save(self.root / "mods" / f"{pid}.json", {"name": name, "updated": now(), "mods": mods})
+        self.mods_changed += 1
+
+    def all_mods(self) -> dict[str, dict]:
+        out = {}
+        for f in (self.root / "mods").glob("p*.json"):
+            d = self._load(f, None)
+            if d:
+                out[f.stem] = d
+        return out
+
+    def blob(self, sha: str) -> Path:
+        return self.root / "blobs" / sha
+
+
+def clean_mods(raw) -> list[dict]:
+    """A player's mod list, keeping only well-formed entries (they are stored and passed on to other players)."""
+    out = []
+    for m in raw if isinstance(raw, list) else []:
+        if not isinstance(m, dict) or not isinstance(m.get("files"), list) or not str(m.get("id", "")).strip():
+            continue
+        files = [{"p": str(f["p"])[:400], "h": f["h"], "s": int(f["s"])} for f in m["files"][:5000]
+                 if isinstance(f, dict) and SHA.fullmatch(str(f.get("h", ""))) and isinstance(f.get("s"), int)
+                 and 0 <= f["s"] < 1 << 32 and f.get("p")]
+        if files:
+            out.append({"id": str(m["id"])[:200], "name": str(m.get("name") or m["id"])[:200],
+                        "version": str(m.get("version", ""))[:100], "built": str(m.get("built", ""))[:40],
+                        "path": str(m.get("path", ""))[:300],
+                        "size": sum(f["s"] for f in files), "files": files})
+    return out[:500]
+
 
 class Client:
     def __init__(self, server: "Server", reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -117,6 +159,7 @@ class Client:
         self.last_heard = now()
         self.closed = False
         self.lock = asyncio.Lock()
+        self.files = False                 # a second connection of a player, only for mod file transfers
 
     def public(self) -> dict:
         p = self.server.store.players.get(self.id or "", {})
@@ -145,7 +188,8 @@ class Client:
 
 
 class Server:
-    def __init__(self, store: Store, password: str = "", max_players: int = 16, motd: str = ""):
+    def __init__(self, store: Store, password: str = "", max_players: int = 16, motd: str = "",
+                 hosted: bool = False):
         self.store = store
         self.password = password
         self.max_players = max_players
@@ -153,6 +197,12 @@ class Server:
         self.clients: dict[str, Client] = {}
         self.leader: Client | None = None      # whose world clock/weather everyone follows
         self.world: dict | None = None         # latest world state from the leader
+        # hosted: the server runs inside a player's program ("Host and play"). That player (the one connecting from
+        # this same PC and saying so) is the host: their mods are the ones everyone gets, their clock everyone follows.
+        # Otherwise (a Raspberry Pi, "Host only") everyone's mods are pooled and the first player online sets the clock.
+        self.hosted = hosted
+        self.host_id: str | None = None
+        self.modset_sent: str | None = None
 
     # ------------------------------------------------------------------ plumbing
     async def broadcast(self, msg: dict, exclude: Client | None = None) -> None:
@@ -207,6 +257,9 @@ class Server:
                 return
             await self.on_hello(c, msg)
             return
+        if c.files != (t in FILE_MESSAGES - {"ping", "pong"}) and t not in ("ping", "pong"):
+            await c.send({"t": "error", "error": f"{t!r} doesn't belong on this connection"})
+            return
         fn = getattr(self, "on_" + str(t), None) if re.fullmatch(r"[a-z_]{1,32}", str(t)) and t != "hello" else None
         if fn is None:
             await c.send({"t": "error", "error": f"unknown message type {t!r}"})
@@ -229,6 +282,10 @@ class Server:
             return
         name = str(msg.get("name", "")).strip()[:40] or "Player"
         p = self.store.player_for_key(key, name)
+        if msg.get("files"):                         # the player's file transfer connection: not a second player
+            c.id, c.name, c.files = p["id"], name, True
+            await c.send({"t": "files_ok"})
+            return
         old = self.clients.get(p["id"])
         was_leader = old is not None and self.leader is old
         if old:                                      # same player reconnecting: replace the stale session
@@ -241,16 +298,24 @@ class Server:
             return
         c.id, c.name = p["id"], name
         self.clients[c.id] = c
-        if self.leader is None or was_leader:        # a reconnecting leader keeps the world clock
+        is_host = self.hosted and bool(msg.get("host")) and str((c.addr or ("",))[0]) in ("127.0.0.1", "::1")
+        if is_host:
+            self.host_id = c.id
+        before = self.leader.id if self.leader else None
+        if self.leader is None or was_leader or is_host:             # a reconnecting leader keeps the world clock
             self.leader = c
-        log.info("%s (%s) joined from %s", c.name, c.id, c.addr)
+        log.info("%s (%s) joined from %s%s", c.name, c.id, c.addr, " - the host" if is_host else "")
+        modset = self.modset()
         await c.send({
             "t": "welcome", "id": c.id, "server_version": VERSION, "motd": self.motd,
-            "leader": self.leader.id, "world": self.world,
+            "leader": self.leader.id, "world": self.world, "host": self.host_id,
             "players": [o.public() for o in self.clients.values() if o is not c],
-            "houses": self.store.list_houses(),
+            "houses": self.store.list_houses(), "modset": modset,
         })
         await self.broadcast({"t": "joined", "player": c.public()}, exclude=c)
+        if before not in (None, self.leader.id):                    # the clock changed hands
+            await self.broadcast({"t": "leader", "id": self.leader.id}, exclude=c)
+        await self.send_modset(modset, exclude=c)        # it's in the welcome already
 
     async def on_ping(self, c: Client, msg: dict) -> None:
         await c.send({"t": "pong", "time": now(), "echo": msg.get("echo")})
@@ -315,6 +380,99 @@ class Server:
     async def on_who(self, c: Client, msg: dict) -> None:
         await c.send({"t": "who", "players": [o.public() for o in self.clients.values()]})
 
+    # ------------------------------------------------------------------ mods
+    def modset(self) -> dict:
+        """The mods everyone should have. Hosted: the host's. Otherwise: everyone's together (for a mod two players
+        have in different versions, the newest build). Each mod lists who has it."""
+        key = (self.host_id, self.store.mods_changed)
+        if getattr(self, "_modset", (None, None))[0] != key:
+            self._modset = (key, self._compute_modset())
+        return self._modset[1]
+
+    def _compute_modset(self) -> dict:
+        lists = self.store.all_mods()
+        if self.hosted:
+            d = lists.get(self.host_id or "", {})
+            mods = [{**m, "by": [d.get("name", "")]} for m in d.get("mods", [])]
+            return {"source": "host", "host": self.host_id, "mods": mods}
+        merged: dict[str, dict] = {}
+        for pid, d in sorted(lists.items(), key=lambda kv: kv[1].get("updated", 0)):
+            for m in d.get("mods", []):
+                same, name = merged.get(m["id"]), d.get("name", pid)
+                if same and same["files"] == m["files"]:
+                    same["by"].append(name)
+                elif not same or m.get("built", "") >= same.get("built", ""):     # an older build never wins
+                    merged[m["id"]] = {**m, "by": [name]}
+        return {"source": "everyone", "host": None, "mods": sorted(merged.values(), key=lambda m: m["name"].lower())}
+
+    async def send_modset(self, modset: dict | None = None, exclude: Client | None = None) -> None:
+        modset = modset or self.modset()
+        text = json.dumps(modset, sort_keys=True)
+        if text != self.modset_sent:
+            self.modset_sent = text
+            await self.broadcast({"t": "modset", **modset}, exclude=exclude)
+
+    def shared_blobs(self) -> set[str]:
+        return {f["h"] for m in self.modset()["mods"] for f in m["files"]}
+
+    async def on_mods(self, c: Client, msg: dict) -> None:
+        """A player's enabled mods: [{id, name, version, path, files: [{p, h, s}]}]."""
+        mods = clean_mods(msg.get("mods"))
+        self.store.set_mods(c.id, c.name, mods)
+        log.info("%s has %d mod(s)", c.name, len(mods))
+        await self.send_modset()
+
+    async def on_blob_check(self, c: Client, msg: dict) -> None:
+        """Which of these files (sha256) the server doesn't have yet: the client uploads those."""
+        want = [h for h in msg.get("h", []) if isinstance(h, str) and SHA.fullmatch(h)]
+        await c.send({"t": "blob_missing", "h": [h for h in want if not self.store.blob(h).exists()]})
+
+    async def on_blob_put(self, c: Client, msg: dict) -> None:
+        """Upload a file of one of your own mods, in order: {h, o (offset), d (base64), end}."""
+        h, offset = str(msg.get("h", "")), msg.get("o")
+        if getattr(c, "mine", (None,))[0] != self.store.mods_changed:
+            c.mine = (self.store.mods_changed, {f["h"]: f["s"] for m in self.store.all_mods().get(c.id, {}).get("mods", [])
+                                                for f in m["files"]})
+        mine = c.mine[1]
+        if h not in mine:
+            await c.send({"t": "blob_bad", "h": h, "error": "not a file of your mods"})
+            return
+        part = self.store.blob(h).with_name(f"{h}.{c.id}.part")
+        size = part.stat().st_size if part.exists() else 0
+        if offset != size:
+            await c.send({"t": "blob_bad", "h": h, "error": f"expected offset {size}", "o": size})
+            return
+        with part.open("ab") as f:
+            f.write(base64.b64decode(str(msg.get("d", ""))))
+        if not msg.get("end"):
+            return
+        digest = hashlib.sha256()
+        with part.open("rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                digest.update(block)
+        if digest.hexdigest() != h or part.stat().st_size != mine[h]:
+            part.unlink()
+            await c.send({"t": "blob_bad", "h": h, "error": "the file didn't arrive intact"})
+            return
+        os.replace(part, self.store.blob(h))
+        await c.send({"t": "blob_ok", "h": h})
+
+    async def on_blob_get(self, c: Client, msg: dict) -> None:
+        """Download a piece of a file that's part of the shared mods: {h, o} -> blob {h, o, d, end}."""
+        h, offset = str(msg.get("h", "")), int(msg.get("o") or 0)
+        path = self.store.blob(h)
+        if not SHA.fullmatch(h) or h not in self.shared_blobs():
+            await c.send({"t": "blob", "h": h, "error": "not shared"})
+            return
+        if not path.exists():
+            await c.send({"t": "blob", "h": h, "error": "not uploaded yet"})
+            return
+        with path.open("rb") as f:
+            f.seek(offset)
+            data = f.read(CHUNK)
+        await c.send({"t": "blob", "h": h, "o": offset, "d": base64.b64encode(data).decode(),
+                      "end": offset + len(data) >= path.stat().st_size})
+
     # ------------------------------------------------------------------ keepalive
     async def keepalive(self) -> None:
         while True:
@@ -326,7 +484,8 @@ async def start(args):
     """Start serving and return once listening: (asyncio server, keepalive task). The all-in-one app
     (client/launcher.py) calls this to host inside the same program as the companion."""
     store = Store(Path(args.data).expanduser().resolve())
-    server = Server(store, password=args.password, max_players=args.max_players, motd=args.motd)
+    server = Server(store, password=args.password, max_players=args.max_players, motd=args.motd,
+                    hosted=getattr(args, "hosted", False))
     srv = await asyncio.start_server(server.handle, args.host, args.port, limit=MAX_LINE)
     addrs = ", ".join(str(s.getsockname()[:2]) for s in srv.sockets)
     log.info("inZOI Multiplayer server %s listening on %s (data: %s)%s", VERSION, addrs, store.root,

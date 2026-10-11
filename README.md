@@ -90,7 +90,8 @@ The **inZOI Multiplayer** panel (left of the screen; drag it by its title, `_` f
 - **People**: who's online and what they're doing, **Join** (jump next to a friend's Zoi), and chat (messages also
   pop up as speech bubbles)
 - **Houses**: share your house, or add a friend's house to your library
-- **Settings**: your name, the server address, the password, and matching the host's time of day
+- **Mods**: the mods everyone uses, and downloading the ones you're missing
+- **Settings**: your name, the server address, the password, and following the host's time of day
 
 Friends' Zois appear in your world when you're in the same city. To hang out, travel to the same place or press
 **Join**.
@@ -99,6 +100,25 @@ Friends' Zois appear in your world when you're in the same city. To hang out, tr
 put it there. The owner saves their home to My Library (Build mode) and shares it in the **Houses** tab. Friends
 click **Add to library** and place it, in Build mode, on the lot the panel names. Then the owner's Zoi walks
 through the same rooms on everyone's screen.
+
+## Mods
+
+Everyone needs the same mods to see each other's clothes, hair and things, and the program takes care of it:
+
+- **Host and play:** the host's mods count. Anyone missing some is asked *"Download them now?"*, in the program's
+  window and in the panel's **Mods** tab.
+- **Stand-alone server (Host only, or a Raspberry Pi):** everyone's mods are shared, and each player is offered the
+  ones the others have. If two players have different versions of a mod, the newer one wins.
+- Downloaded mods load the next time you start inZOI. Only enabled mods are shared, and a mod replaced by a newer
+  version is moved to `%APPDATA%\inzoi-mp\replaced-mods`, never deleted.
+
+## Time
+
+- The **time of day is shared**. Pausing only pauses your own game, and when you carry on, your clock catches up
+  with your friends'. Build mode and menus pause only you, too.
+- The game runs at **normal speed while anyone's Zoi is awake**. When **everyone's Zoi is asleep**, time speeds up
+  for everyone until somebody wakes up.
+- Season and weather follow the host. (To keep your own time, turn off *Follow the host's time* in Settings.)
 
 ## If something's wrong
 
@@ -123,7 +143,8 @@ through the same rooms on everyone's screen.
 | Doing | Actions on objects (the same object in public places; homes can differ, so some actions only show as the motion), solo actions, socials toward your Zoi |
 | Talking | Chat in the panel, with speech bubbles over their Zoi |
 | Visiting | Houses shared through your library; friends' Zois are let in through your front door |
-| Time | Optionally match the host's time of day and season |
+| Time | Shared time of day (pausing is your own), fast-forward while everyone sleeps, the host's season and weather |
+| Mods | The host's mods (or everyone's, on a stand-alone server), downloaded after asking |
 
 ## How it works
 

@@ -95,7 +95,109 @@ async def run():
         b.w.close()
         srv.close()
         await srv.wait_closed()
+    await mods_shared()
+    await mods_hosted()
     print("all server tests passed")
+
+
+def sha(data: bytes) -> str:
+    return mp.hashlib.sha256(data).hexdigest()
+
+
+async def files_conn(port, player):
+    f = Fake(port, player.name, key=player.key)
+    f.r, f.w = await asyncio.open_connection("127.0.0.1", port, limit=mp.MAX_LINE)
+    await f.send({"t": "hello", "protocol": mp.PROTOCOL, "key": player.key, "name": player.name, "password": "",
+                  "files": True})
+    await f.expect("files_ok")
+    return f
+
+
+async def upload(f, data, step=3):
+    h = sha(data)
+    for o in range(0, len(data), step):                              # tiny pieces, to exercise the offsets
+        await f.send({"t": "blob_put", "h": h, "o": o, "d": mp.base64.b64encode(data[o:o + step]).decode(),
+                      "end": o + step >= len(data)})
+    return await f.expect("blob_ok", "blob_bad")
+
+
+async def download(f, h):
+    out, o = b"", 0
+    while True:
+        await f.send({"t": "blob_get", "h": h, "o": o})
+        m = await f.expect("blob")
+        if m.get("error"):
+            return m["error"]
+        out += mp.base64.b64decode(m["d"])
+        o = len(out)
+        if m["end"]:
+            return out
+
+
+async def mods_shared():
+    """A Pi-style server: everyone's mods are pooled, files go up and come down intact, only shared files are served."""
+    with tempfile.TemporaryDirectory() as tmp:
+        server = mp.Server(mp.Store(Path(tmp)))
+        srv = await asyncio.start_server(server.handle, "127.0.0.1", 0, limit=mp.MAX_LINE)
+        port = srv.sockets[0].getsockname()[1]
+        a, b = Fake(port, "Ana"), Fake(port, "Ben")
+        await a.connect()
+        await b.connect()
+        await a.expect("joined")
+        pak, cfg = b"PAK-DATA-1234567", b'{"ok":1}'
+        mod = {"id": "Top_A1", "name": "Top", "version": "1", "path": "88849/1_2/Top_A1",
+               "files": [{"p": "a.pak", "h": sha(pak), "s": len(pak)}, {"p": "m.json", "h": sha(cfg), "s": len(cfg)}]}
+        await a.send({"t": "mods", "mods": [mod, {"id": "broken", "files": [{"p": "x", "h": "nothex", "s": 1}]}]})
+        ms = await b.expect("modset")
+        assert ms["source"] == "everyone" and [m["id"] for m in ms["mods"]] == ["Top_A1"] and ms["mods"][0]["by"] == ["Ana"]
+        assert ms["mods"][0]["size"] == len(pak) + len(cfg)
+        assert (await a.expect("modset"))["mods"][0]["id"] == "Top_A1"   # the sender gets it too
+        fa, fb = await files_conn(port, a), await files_conn(port, b)
+        await fa.send({"t": "blob_check", "h": [sha(pak), sha(cfg)]})
+        assert len((await fa.expect("blob_missing"))["h"]) == 2
+        assert await download(fb, sha(pak)) == "not uploaded yet"
+        assert (await upload(fb, pak, step=len(pak)))["t"] == "blob_bad"   # Ben can't upload files of Ana's mods
+        assert (await upload(fa, pak))["t"] == "blob_ok"
+        assert (await upload(fa, cfg))["t"] == "blob_ok"
+        assert await download(fb, sha(pak)) == pak and await download(fb, sha(cfg)) == cfg
+        assert await download(fb, sha(b"secret")) == "not shared"
+        await fb.send({"t": "chat", "text": "hi"})                         # player messages don't go on file connections
+        assert "belong" in (await fb.expect("error"))["error"]
+        await b.send({"t": "mods", "mods": [{**mod, "id": "Hair_B", "name": "Hair", "path": "InGame/Hair_B"}]})
+        ms = await a.expect("modset")
+        assert [m["id"] for m in ms["mods"]] == ["Hair_B", "Top_A1"]       # pooled, by name
+        for x in (a, b, fa, fb):
+            x.w.close()
+        srv.close()
+        await srv.wait_closed()
+
+
+async def mods_hosted():
+    """Host and play: the host's mods are what everyone gets, whatever the others have; the host leads the clock."""
+    with tempfile.TemporaryDirectory() as tmp:
+        server = mp.Server(mp.Store(Path(tmp)), hosted=True)
+        srv = await asyncio.start_server(server.handle, "127.0.0.1", 0, limit=mp.MAX_LINE)
+        port = srv.sockets[0].getsockname()[1]
+        guest, host = Fake(port, "Guest"), Fake(port, "Host")
+        wg = await guest.connect()
+        assert wg["leader"] == wg["id"] and wg["modset"]["source"] == "host" and wg["modset"]["mods"] == []
+        host.r, host.w = await asyncio.open_connection("127.0.0.1", port, limit=mp.MAX_LINE)
+        await host.send({"t": "hello", "protocol": mp.PROTOCOL, "key": host.key, "name": "Host", "password": "",
+                         "host": True})
+        wh = await host.expect("welcome")
+        assert wh["host"] == wh["id"] and wh["leader"] == wh["id"]
+        assert (await guest.expect("joined"))["player"]["leader"] is True
+        assert (await guest.expect("leader"))["id"] == wh["id"]           # the host takes over the clock
+        assert (await guest.expect("modset"))["host"] == wh["id"]
+        data = b"x" * 10
+        await guest.send({"t": "mods", "mods": [{"id": "GuestMod", "files": [{"p": "g", "h": sha(data), "s": 10}]}]})
+        await host.send({"t": "mods", "mods": [{"id": "HostMod", "files": [{"p": "h", "h": sha(data), "s": 10}]}]})
+        ms = await guest.expect("modset")
+        assert [m["id"] for m in ms["mods"]] == ["HostMod"] and ms["mods"][0]["by"] == ["Host"]
+        for x in (guest, host):
+            x.w.close()
+        srv.close()
+        await srv.wait_closed()
 
 
 if __name__ == "__main__":

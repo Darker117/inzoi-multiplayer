@@ -19,8 +19,10 @@ import collections
 import json
 import logging
 import os
+import re
 import secrets
 import sys
+import threading
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -28,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import houses  # noqa: E402
 import install  # noqa: E402
+import mods  # noqa: E402
 import webui  # noqa: E402
 from game import Game, GameError, describe_act  # noqa: E402
 from lua_data import Registry  # noqa: E402
@@ -36,11 +39,18 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.3.2"
+VERSION = "0.4.0"
+SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
+SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 log = logging.getLogger("companion")
+
+
+def size_text(n: int) -> str:
+    return f"{n / 1048576:.1f} MB" if n < 100 * 1048576 else f"{n / 1073741824:.2f} GB" if n > 1073741824 \
+        else f"{n // 1048576} MB"
 
 
 def first_run_setup(cfg: dict, ask_server: bool = True):
@@ -99,6 +109,7 @@ class Remote:
         self.profile = None
         self.profile_hash = None
         self.state = None
+        self.state_at = 0.0          # when their last state arrived
         self.spawned = False
         self.spawn_requested = 0.0
         self.hidden = False
@@ -128,14 +139,22 @@ class Companion:
         self.notice = ""
         self.world = "out"
         self.leader = None           # player whose clock everyone may follow (the server picks; usually the host)
-        self.leader_world = None     # latest {hour, minute, season, ...} from the leader
-        self.world_synced = 0.0
+        self.leader_world = None     # latest {hour, minute, speed, season, weather} from the leader
+        self.world_synced = 0.0      # when season/weather were last shared or matched
+        self.my_weather = {}         # as leader: my season and weather, refreshed once a minute
+        self.my_clock = None         # (hour, minute, speed, paused) of my game, refreshed every second
+        self.sleeping = False        # my Zoi is asleep
         self.houses: dict[str, dict] = {}       # owner player id -> shared house meta {name, by, site, updated}
         self.house_waiters: dict[str, asyncio.Future] = {}
         self.objects = {}            # entity id -> object descriptor (or None), cached
         self.sent_profile = None     # fingerprint of the profile the server has
         self.cleaning = {}           # leftover puppet key -> when we asked to remove it
         self.hosting = None          # (port, password) when this program also runs the server (launcher "Host and play")
+        self.mods_local = None       # every mod on this PC (mods.scan), once scanned
+        self.modset = None           # the server's {source, host, mods}: the mods everyone should have
+        self.mod_offer = None        # mods this PC is missing: {key, mods, size, from, state, done, total, message}
+        self.mod_share = None        # uploading my mods' files: {done, total}
+        self.asking = False          # a "download these mods?" question is waiting in the console
         install.MAILBOX_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ helpers
@@ -169,6 +188,7 @@ class Companion:
                              "(or close it first).") from None
         asyncio.create_task(self.game_loop())
         asyncio.create_task(self.mailbox_loop())
+        asyncio.create_task(self.mods_loop())
         backoff = 2
         while True:
             try:
@@ -191,7 +211,7 @@ class Companion:
         self.connected_at = time.time()
         self.sent_profile = None
         await self.send({"t": "hello", "protocol": PROTOCOL, "key": self.cfg["key"], "name": self.cfg["name"],
-                         "password": password})
+                         "password": password, "host": bool(self.hosting)})
         while True:
             line = await reader.readline()
             if not line:
@@ -209,6 +229,11 @@ class Companion:
             for p in m["players"]:
                 self.update_remote(p)
             self.houses = {h["owner"]: h for h in m.get("houses") or []}
+            self.modset = m.get("modset")
+            self.check_mods()
+        elif t == "modset":
+            self.modset = {k: v for k, v in m.items() if k != "t"}
+            self.check_mods()
         elif t == "joined":
             log.info("%s joined", m["player"]["name"])
             self.update_remote(m["player"])
@@ -297,7 +322,7 @@ class Companion:
         log.info("got %s's Zoi: %s %s (%s)", r.name, profile["first_name"], profile["last_name"], profile["gender"])
 
     def set_state(self, r: Remote, st: dict):
-        r.state = st
+        r.state, r.state_at = st, time.time()
         if not r.spawned:
             return
         if "n" in st:
@@ -360,23 +385,56 @@ class Companion:
                 self.mail.op("hide", key=r.pid, on=r.hidden)
 
     async def sync_world(self):
-        """The leader shares its clock and season; others match it if they ticked "Match the host's time"
-        (it skips their game forward, so it's opt-in)."""
+        """Time is shared, but pausing isn't: only your own game stops. Everyone runs at the same speed (keep_speed),
+        and a player whose clock is behind (they paused, or came in later) catches up with whoever is furthest ahead.
+        Season and weather follow the leader (the host; on a Raspberry Pi, the first player online). Each save keeps
+        its own day count: jumping whole days would age Zois."""
+        call = self.game.call
+        slow = time.time() - self.world_synced > 60           # season and weather: once a minute is plenty
+        if slow:
+            self.world_synced = time.time()
         if self.leader == self.me_id:
-            env = await self.g(self.game.call, "environment.get_state")
-            await self.send({"t": "world", "world": {k: env.get(k) for k in ("hour", "minute", "season", "weather")}})
+            if slow or not self.my_weather:
+                env = await self.g(call, "environment.get_state")
+                self.my_weather = {"season": env.get("season"), "weather": env.get("weather")}
+                await self.send({"t": "world", "world": self.my_weather})
             return
+        if not self.cfg.get("sync_time", True) or self.world != "play" or not self.my_clock:
+            return
+        mine = self.my_clock[0] * 60 + self.my_clock[1]
+        ahead = [(c[0] * 60 + c[1] - mine) % 1440 for c in self.remote_clocks()]
+        behind = max([d for d in ahead if d < 720], default=0)  # more than 12 h "ahead" means behind me
+        if behind > 10:
+            log.info("catching up with your friends' time: %d minutes", behind)
+            await self.g(call, "environment.time_skip", minutes=behind)
         w = self.leader_world
-        if not w or not self.cfg.get("sync_time") or time.time() - self.world_synced < 600:
+        if slow and w:
+            env = await self.g(call, "environment.get_state")
+            if w.get("season") and env.get("season") != w["season"]:
+                log.info("matching the host's season: %s", w["season"])
+                await self.g(call, "environment.change_season", season=w["season"])
+            if w.get("weather") and env.get("weather") != w["weather"]:
+                log.info("matching the host's weather: %s", w["weather"])
+                await self.g(call, "environment.override_weather", weather=w["weather"], step=0)
+
+    def remote_clocks(self) -> list:
+        """[hour, minute] of every friend who's in the game right now (their state is fresh)."""
+        return [r.state["clock"] for r in self.remotes.values()
+                if r.state and r.state.get("clock") and time.time() - r.state_at < 10]
+
+    async def keep_speed(self):
+        """Game speed is everyone's: normal for all, except while every player's Zoi is asleep, when everyone's game
+        runs fast until somebody wakes. Pausing stays each player's own. Alone on the server, your speed is yours."""
+        others = [r for r in self.remotes.values() if r.state and time.time() - r.state_at < 10]
+        clock = self.my_clock
+        if not others or not clock or clock[3]:              # nobody to keep in step with / I'm paused
             return
-        self.world_synced = time.time()
-        env = await self.g(self.game.call, "environment.get_state")
-        if w.get("season") and env.get("season") != w["season"]:
-            await self.g(self.game.call, "environment.change_season", season=w["season"])
-        behind = ((w["hour"] * 60 + w["minute"]) - (env["hour"] * 60 + env["minute"])) % 1440
-        if 15 < behind < 720:            # only ever skip forward, and not by more than half a day
-            log.info("matching the host's time: skipping %d minutes", behind)
-            await self.g(self.game.call, "environment.time_skip", minutes=behind)
+        asleep = self.sleeping and all(r.state.get("sleep") for r in others)
+        want = SLEEP_SPEED if asleep else 1
+        if abs(clock[2] - want) > 0.01:
+            log.info("everyone's asleep: time runs fast" if asleep else
+                     "game speed is normal while anyone's awake (everyone's game runs at the same speed)")
+            await self.g(self.game.call, "environment.time_speed", speed=want)
 
     async def check_home(self):
         """Know my home's front door, so friends' puppets can come in like invited guests (also after a move)."""
@@ -471,7 +529,7 @@ class Companion:
         while True:
             try:
                 world = self.world = await self.g(self.game.world)
-                if world == "paused":
+                if world in ("paused", "stopped"):
                     self.mod["beat"] = max(self.mod["beat"], time.time() - 3)   # no ticks while paused: not dead
                 if world == "out":
                     if was_in_world:
@@ -497,6 +555,12 @@ class Companion:
                         outfit = await self.g(self.game.outfit, self.my_entity)
                     except GameError:
                         pass
+                if tick % 5 == 2:
+                    c = await self.g(self.game.call, "environment.get_time")
+                    self.my_clock = (c["hour"], c["minute"], c.get("time_scale", 1), bool(c.get("paused")))
+                    self.sleeping = bool(SLEEPING.search(f"{(act or {}).get('bag', '')} {anim or ''}"))
+                    if world == "play" and self.writer and self.me_id:
+                        await self.keep_speed()
                 if tick % 25 == 0 and time.time() - self.mod["beat"] > 10:
                     log.info("the mod went quiet: loading it again")
                     await self.ensure_mod()
@@ -510,11 +574,12 @@ class Companion:
                             self.sent_profile = h
                             log.info("shared your Zoi %s %s", profile["first_name"], profile["last_name"])
                         await self.check_home()
-                    if tick % 50 == 3 and world == "play":
+                    if tick % 15 == 3 and world == "play":
                         await self.sync_world()
                     self.n += 1
+                    clock = list(self.my_clock[:2]) if self.my_clock and world == "play" else None
                     await self.send({"t": "state", "state": {"n": self.n, **st, "act": act, "anim": anim,
-                                                              "outfit": outfit}})
+                                                              "outfit": outfit, "clock": clock, "sleep": self.sleeping}})
                     await self.manage_puppets()
             except GameError as e:
                 log.debug("game: %s", e)
@@ -541,6 +606,186 @@ class Companion:
                 log.warning("mailbox: %s", e)
             await asyncio.sleep(0.1)
 
+    # ------------------------------------------------------------------ mods
+    async def mods_loop(self):
+        """Tell the server which mods this PC has (again whenever they change), share their files when friends get
+        their mods from me, and finish an install that had to wait for the game to close."""
+        hashes = mods.Hashes()
+        sent_for, sent, last_scan = None, None, 0.0
+        while True:
+            try:
+                if self.writer and self.me_id and (sent_for != self.connected_at or time.time() - last_scan > 120):
+                    self.mods_local = await self.g(mods.scan, mods.MODS_DIR, hashes)
+                    last_scan = time.time()
+                    mine = [{k: v for k, v in m.items() if k != "enabled"} for m in self.mods_local if m["enabled"]]
+                    if sent_for != self.connected_at or mine != sent:
+                        await self.send({"t": "mods", "mods": mine})
+                        sent_for, sent = self.connected_at, mine
+                        log.info("your mods: %d", len(mine))
+                    self.check_mods()
+                    await self.share_mods(mine)
+                o = self.mod_offer
+                if o and o["state"] == "close_game" and self.world == "out":
+                    await self.install_mods(o)
+            except (OSError, ConnectionError, ValueError, asyncio.TimeoutError) as e:
+                log.warning("mods: %s", e)
+                self.mod_share = None
+            await asyncio.sleep(5)
+
+    async def share_mods(self, mine: list):
+        """Upload the files of my mods the server doesn't have yet, when friends get their mods from me: always on
+        a stand-alone server, only the host's when someone hosts and plays."""
+        ms = self.modset or {}
+        if not mine or (ms.get("source") == "host" and ms.get("host") != self.me_id):
+            return
+        files = {f["h"]: (mods.MODS_DIR / m["path"] / f["p"], f["s"]) for m in mine for f in m["files"]}
+        async with mods.Transfer(self.address(), self.cfg["key"], self.cfg["name"]) as tr:
+            need = await tr.not_on_server(list(files))
+            if not need:
+                return
+            share = self.mod_share = {"done": 0, "total": sum(files[h][1] for h in need)}
+            log.info("sharing your mods with friends: %s to upload", size_text(share["total"]))
+
+            def progress(n):
+                share["done"] += n
+            for h in need:
+                await tr.upload(files[h][0], h, progress)
+            log.info("your mods are shared")
+            self.mod_share = None
+
+    def check_mods(self):
+        """Compare this PC's mods with the server's set and offer the missing ones (asked once per set)."""
+        ms, o = self.modset, self.mod_offer
+        if ms is None or self.mods_local is None or (o and o["state"] in ("downloading", "waiting", "installing")):
+            return
+        need = mods.missing(ms.get("mods", []), self.mods_local)
+        if not need:
+            if o and o["state"] != "done":
+                self.mod_offer = None
+            return
+        key = mods.offer_key(need)
+        if o and o["key"] == key:
+            return
+        o = self.mod_offer = {
+            "key": key, "mods": need, "size": sum(m.get("size", 0) for m in need), "done": 0, "message": "",
+            "from": sorted({n for m in need for n in m.get("by", []) if n}), "source": ms.get("source"),
+            "state": "declined" if self.cfg.get("mods_declined") == key else "ask"}
+        o["total"] = o["size"]
+        log.info("%s %d mod(s) you don't have (%s): %s", self.mods_who(o), len(need), size_text(o["size"]),
+                 ", ".join(m["name"] for m in need))
+        if o["state"] == "ask":
+            self.ask_console(o)
+
+    def mods_who(self, o: dict) -> str:
+        names = ", ".join(o["from"]) or "someone"
+        return f"The host ({names}) uses" if o["source"] == "host" else f"Your friends ({names}) use"
+
+    def ask_console(self, o: dict):
+        """Ask in the program's window too (the in-game panel asks as well; whichever answers first counts)."""
+        if self.asking or not (sys.stdin and sys.stdin.isatty()):
+            return
+        self.asking = True
+        loop = asyncio.get_running_loop()
+        names = ", ".join(m["name"] for m in o["mods"][:12]) + (" ..." if len(o["mods"]) > 12 else "")
+        question = (f"\n  ------------------------------------------------------------------------------\n"
+                    f"  {self.mods_who(o)} {len(o['mods'])} mod(s) you don't have ({size_text(o['size'])}):\n"
+                    f"    {names}\n"
+                    f"  Without them, some of their clothes or things won't show up for you.\n"
+                    f"  Download them now? Type y (yes) or n (no) and press Enter [y]: ")
+
+        def ask():
+            try:
+                yes = not input(question).strip().lower().startswith("n")
+            except (EOFError, OSError, RuntimeError):
+                return
+            loop.call_soon_threadsafe(self.answer_mods, o["key"], yes, True)
+        threading.Thread(target=ask, daemon=True).start()
+
+    def answer_mods(self, key: str, yes: bool, console: bool = False):
+        if console:
+            self.asking = False
+        o = self.mod_offer
+        if not o or o["key"] != key or o["state"] not in ("ask", "declined", "error"):
+            if console and o and o["state"] == "ask":
+                self.ask_console(o)                  # the question changed while they were answering: ask again
+            return
+        if not console and self.asking:
+            print("\n  (Answered in the game.)\n", flush=True)
+        if yes:
+            o["state"], o["message"] = "downloading", ""
+            self.cfg.pop("mods_declined", None)
+            save_config(self.cfg)
+            asyncio.get_running_loop().create_task(self.download_mods(o))
+        else:
+            o["state"] = "declined"
+            self.cfg["mods_declined"] = key
+            save_config(self.cfg)
+            log.info("not downloading the mods (the in-game panel's Mods tab can still get them)")
+
+    async def download_mods(self, o: dict):
+        stage = mods.DATA / "downloads"
+        files = {f["h"]: f["s"] for m in o["mods"] for f in m["files"]}
+        try:
+            while self.mod_offer is o:
+                todo = [h for h in files if not (stage / h).exists()]
+                o["done"] = sum(s for h, s in files.items() if h not in todo)
+                o["total"] = sum(files.values())
+                log.info("downloading %d mod(s): %s", len(o["mods"]), size_text(o["total"] - o["done"]))
+                waiting = False
+
+                def progress(n):
+                    o["done"] += n
+                async with mods.Transfer(self.address(), self.cfg["key"], self.cfg["name"]) as tr:
+                    for h in todo:
+                        if await tr.download(h, stage / h, progress):
+                            waiting = True                    # not uploaded yet: its owner is still sharing it
+                if not waiting:
+                    break
+                o["state"], o["message"] = "waiting", f"waiting for {', '.join(o['from'])} to finish sharing them"
+                await asyncio.sleep(10)
+                o["state"] = "downloading"
+            else:
+                return
+            await self.install_mods(o)
+        except (OSError, ConnectionError, ValueError, asyncio.TimeoutError) as e:
+            o["state"], o["message"] = "error", str(e)
+            log.warning("downloading the mods failed: %s", e)
+
+    async def install_mods(self, o: dict):
+        stage = mods.DATA / "downloads"
+        o["state"] = "installing"
+        for m in list(o["mods"]):
+            try:
+                where = await self.g(mods.install_mod, m, lambda h: stage / h, self.mods_local or [])
+            except mods.Busy:
+                o["state"] = "close_game"
+                o["message"] = "Close inZOI to finish: some of these mods are in use. They install by themselves then."
+                log.info("some mods are in use by the game: they'll be installed when you close inZOI")
+                return
+            except (OSError, ValueError) as e:
+                o["state"], o["message"] = "error", f"couldn't install {m['name']}: {e}"
+                log.warning("installing %s failed: %s", m["name"], e)
+                return
+            log.info("installed mod %s -> %s", m["name"], where)
+            o["mods"].remove(m)
+        for h in list(stage.glob("*")):
+            h.unlink(missing_ok=True)
+        o["state"] = "done"
+        o["message"] = "Restart inZOI to load them." if self.world != "out" else "They load when you start inZOI."
+        log.info("mods installed. %s", o["message"])
+        self.mods_local = await self.g(mods.scan)
+
+    def mods_status(self) -> dict:
+        ms, o = self.modset or {}, self.mod_offer
+        have = {m["id"]: mods.fingerprint(m) for m in self.mods_local or [] if m["enabled"]}
+        out = {"source": ms.get("source"), "count": len(ms.get("mods", [])), "sharing": self.mod_share,
+               "list": [{"name": m["name"], "have": have.get(m["id"]) == mods.fingerprint(m)}
+                        for m in ms.get("mods", [])[:40]]}
+        if o:
+            out["offer"] = {**{k: o.get(k) for k in ("key", "state", "size", "done", "total", "from", "message")},
+                            "names": [m["name"] for m in o["mods"]]}
+        return out
+
     def despawn_all(self):
         """On the way out: take every puppet out of the world so none gets saved into the game."""
         for key in list(self.puppet_ids):
@@ -565,9 +810,9 @@ class Companion:
             return {"version": VERSION, "connected": bool(self.writer and self.me_id),
                     "server": "this PC" if self.hosting else self.cfg["server"],
                     "name": self.cfg["name"], "mod": self.mod["state"], "notice": self.notice,
-                    "paused": self.world == "paused", "port": self.address()[1],
-                    "host": self.leader == self.me_id, "sync_time": bool(self.cfg.get("sync_time")),
-                    "players": players, "chat": list(self.chat)[-30:]}
+                    "paused": self.world in ("paused", "stopped"), "port": self.address()[1],
+                    "host": self.leader == self.me_id, "sync_time": bool(self.cfg.get("sync_time", True)),
+                    "players": players, "chat": list(self.chat)[-30:], "mods": self.mods_status()}
 
         async def chat(body):
             text = str(body.get("text", "")).strip()[:500]
@@ -605,7 +850,7 @@ class Companion:
                 if self.writer:
                     self.writer.close()          # reconnect with the new settings
             return {"ok": True, "name": self.cfg["name"], "server": "this PC" if self.hosting else self.cfg["server"],
-                    "port": self.address()[1], "sync_time": bool(self.cfg.get("sync_time"))}
+                    "port": self.address()[1], "sync_time": bool(self.cfg.get("sync_time", True))}
 
         async def house_list(_):
             added = self.cfg.get("added_houses", {})
@@ -643,8 +888,12 @@ class Companion:
             log.info("added %s to your library", title)
             return {"ok": True, "title": title}
 
+        async def mods_answer(body):
+            self.answer_mods(str(body.get("key", "")), body.get("answer") == "yes")
+            return self.mods_status()
+
         return {"/status": status, "/chat": chat, "/join": join, "/settings": settings,
-                "/houses": house_list, "/share": share, "/add_house": add_house}
+                "/houses": house_list, "/share": share, "/add_house": add_house, "/mods": mods_answer}
 
 
 def setup_logging(verbose: bool):

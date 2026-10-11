@@ -130,6 +130,7 @@
         renderPlayers(s);
         renderChat(s);
         renderTitle(s);
+        renderMods(s.mods);
         $('s-sync').className = 'toggle' + (s.sync_time ? ' on' : '');
         $('s-sync').style.display = s.host ? 'none' : '';
         if (!lastStatus) {
@@ -176,6 +177,70 @@
     ['s-name', 's-server', 's-port', 's-password'].forEach(function (id) {
         $(id).addEventListener('keydown', function (e) { e.stopPropagation(); });
     });
+
+    // ------------------------------------------------------------------ mods
+    var modsKey = null;
+    function sizeText(n) {
+        n = n || 0;
+        return n < 104857600 ? (n / 1048576).toFixed(1) + ' MB' : Math.round(n / 1048576) + ' MB';
+    }
+    function renderMods(m) {
+        m = m || {};
+        var o = m.offer, text = '', ask = false, bar = false;
+        var who = o ? (o.from.length ? o.from.join(', ') : 'someone') : '';
+        modsKey = o ? o.key : null;
+        if (!m.source) {
+            text = 'Waiting for the server...';
+        } else if (!o || o.state === 'done') {
+            text = m.count ? "You have all the mods " + (m.source === 'host' ? 'the host uses.' : 'your friends use.')
+                : (m.source === 'host' ? 'The host uses no mods.' : 'Nobody has shared any mods yet.');
+            if (o) { text = 'Mods installed. ' + o.message; }
+        } else if (o.state === 'ask' || o.state === 'declined' || o.state === 'error') {
+            text = (m.source === 'host' ? 'The host (' + who + ') uses ' : 'Your friends (' + who + ') use ') +
+                o.names.length + (o.names.length === 1 ? ' mod' : ' mods') + " you don't have (" + sizeText(o.size) +
+                "). Without them, some of their clothes or things won't show up for you. Download them?";
+            if (o.state === 'declined') { text = 'You chose not to download ' + o.names.length + ' mod(s) (' + sizeText(o.size) + ').'; }
+            if (o.state === 'error') { text = 'The download stopped: ' + o.message; }
+            ask = true;
+        } else if (o.state === 'downloading' || o.state === 'waiting') {
+            text = o.state === 'waiting' ? 'Waiting for ' + who + ' to finish sharing them...'
+                : 'Downloading ' + o.names.length + ' mod(s): ' + sizeText(o.done) + ' of ' + sizeText(o.total);
+            bar = true;
+        } else if (o.state === 'installing') {
+            text = 'Installing...';
+        } else {
+            text = o.message;
+        }
+        if (m.sharing) {
+            text += ' Sharing your mods with friends: ' + Math.floor(100 * m.sharing.done / Math.max(1, m.sharing.total)) + '%';
+        }
+        $('m-state').textContent = text;
+        $('m-buttons').style.display = ask ? 'block' : 'none';
+        $('m-yes').textContent = o && o.state === 'error' ? 'Try again' : 'Download';
+        $('m-no').style.display = o && o.state === 'ask' ? '' : 'none';
+        $('m-bar').style.display = bar ? 'block' : 'none';
+        $('m-fill').style.width = (o && o.total ? Math.floor(100 * o.done / o.total) : 0) + '%';
+        var tab = $('tab-mods'), alert = o && o.state === 'ask';
+        tab.textContent = alert ? 'Mods (' + o.names.length + ')' : 'Mods';
+        tab.className = 'tab' + (tab.className.indexOf(' on') >= 0 ? ' on' : '') + (alert ? ' alert' : '');
+        var list = $('m-list');
+        clear(list);
+        if (!(m.list || []).length) { list.appendChild(el('div', 'empty', 'None yet.')); }
+        (m.list || []).forEach(function (x) {
+            var row = el('div', 'mod');
+            row.appendChild(el('span', x.have ? 'ok' : 'no', x.have ? 'OK' : '--'));
+            row.appendChild(document.createTextNode(x.name));
+            list.appendChild(row);
+        });
+    }
+    function answerMods(yes) {
+        if (!modsKey) { return; }
+        post('/mods', { key: modsKey, answer: yes ? 'yes' : 'no' }, function (r) {
+            if (!r) { showNotice(NOT_RUNNING); } else { renderMods(r); }
+        });
+    }
+    $('m-yes').addEventListener('click', function () { answerMods(true); });
+    $('m-no').addEventListener('click', function () { answerMods(false); });
 
     // ------------------------------------------------------------------ houses
     function houseRow(title, sub, label, on, cb) {
@@ -224,9 +289,10 @@
     function showTab(name) {
         var tabs = document.querySelectorAll('.tab');
         for (var i = 0; i < tabs.length; i++) {
-            tabs[i].className = 'tab' + (tabs[i].getAttribute('data-tab') === name ? ' on' : '');
+            tabs[i].className = 'tab' + (tabs[i].getAttribute('data-tab') === name ? ' on' : '') +
+                (tabs[i].className.indexOf(' alert') >= 0 ? ' alert' : '');
         }
-        ['people', 'houses', 'settings'].forEach(function (p) {
+        ['people', 'houses', 'mods', 'settings'].forEach(function (p) {
             $('pane-' + p).className = 'pane' + (p === name ? ' on' : '');
         });
         if (housesTimer) { clearInterval(housesTimer); housesTimer = null; }

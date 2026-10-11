@@ -79,7 +79,8 @@ class Game:
         return self.world() != "out"
 
     def world(self) -> str:
-        """'play' (the world is running), 'paused' (in the world, but stopped: build mode, menus, map...), 'out'."""
+        """'play' (the world is running), 'paused' (in the world, but held by build mode, menus, the map...),
+        'stopped' (in the world, clock paused with the time controls), 'out'."""
         try:
             s = self.call("game.get_state")
         except GameError:
@@ -90,7 +91,7 @@ class Game:
             return "paused"
         try:
             if self.call("environment.get_simulation").get("is_paused"):
-                return "paused"                 # the time controls are on pause: the mod's per-frame code stops too
+                return "stopped"                # the time controls are on pause: the mod's per-frame code stops too
         except GameError:
             pass
         return "play"

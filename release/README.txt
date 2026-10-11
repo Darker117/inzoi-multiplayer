@@ -97,10 +97,32 @@ The inZOI Multiplayer panel (left of the screen; drag it by its title, "_" folds
   - People: who's online and what they're doing, Join (jump your Zoi next to a friend's Zoi), and chat
     (messages also pop up as speech bubbles)
   - Houses: share your house, or add a friend's house to your library (see VISITING)
-  - Settings: your name, the server address, the password, and "Match the host's time of day"
+  - Mods: the mods everyone uses, and downloading the ones you're missing (see MODS)
+  - Settings: your name, the server address, the password, and following the host's time of day
 
 Friends' Zois appear in your world when you're in the same city. To hang out, travel to the same place, or press
 Join.
+
+
+MODS
+----
+Everyone needs the same mods to see each other's clothes, hair and things. The program takes care of it:
+  - When someone hosts and plays (2), the host's mods count. Anyone missing some is asked "Download them now?",
+    in the program's window and in the panel's Mods tab.
+  - On a stand-alone server (3, or a Raspberry Pi), everyone's mods are shared: each player is offered the ones the
+    others have. If two players have different versions of a mod, the newer one wins.
+  - Downloaded mods load the next time you start inZOI. If you say no, the Mods tab can still get them later.
+  - Only enabled mods are shared. A mod that gets replaced by a newer version is moved to
+    %APPDATA%\inzoi-mp\replaced-mods, never deleted.
+
+
+TIME
+----
+  - The time of day is shared. Pausing only pauses your own game; when you carry on, your clock catches up with
+    your friends'. Build mode and menus pause only you, too.
+  - The game runs at normal speed while anyone's Zoi is awake. When everyone's Zoi is asleep, time speeds up for
+    everyone until somebody wakes up.
+  - Season and weather follow the host. (To keep your own time, turn off "Follow the host's time" in Settings.)
 
 
 VISITING EACH OTHER AT HOME
@@ -127,7 +149,7 @@ IF SOMETHING'S WRONG
 
 GOOD TO KNOW
 ------------
-- Building, menus and the map pause the game. Friends' Zois wait until you're back.
+- Building, menus and the map pause only your game. Friends' Zois wait in your world until you're back.
 - Objects in public places are the same in everyone's game, so a friend working out at the gym uses the same
   machine in your world. Homes can differ, so there some actions only show as the motion.
 - Close the program when you're done (the window's X or Ctrl+C), so friends' Zois leave your world cleanly.

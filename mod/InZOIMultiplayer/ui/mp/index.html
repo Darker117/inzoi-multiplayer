@@ -95,6 +95,15 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
                background: rgba(255, 255, 255, 0.08); flex-shrink: 0; }
 .toggle.on .box { background: #7fd1b9; border-color: #7fd1b9; }
 .toggle.on { color: #eef1f6; }
+.tab.alert { color: #f0b35a; }
+.mods-state { font-size: 14px; line-height: 1.4; margin: 4px 0 8px; }
+.bar { height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.08); margin: 0 0 10px; display: none; }
+.bar .fill { height: 8px; border-radius: 4px; background: #7fd1b9; width: 0; }
+.m-buttons { display: none; margin-bottom: 10px; }
+.m-buttons .btn { margin-right: 8px; }
+.mod { font-size: 14px; padding: 3px 2px; white-space: nowrap; overflow: hidden; }
+.mod .ok { color: #7fd1b9; margin-right: 6px; }
+.mod .no { color: #f0b35a; margin-right: 6px; }
 .field input { flex: 1; min-width: 0; padding: 5px 8px; border-radius: 7px; border: 1px solid rgba(255, 255, 255, 0.10);
                background: rgba(255, 255, 255, 0.08); outline: none; font-size: 14px; }
 </style>
@@ -111,7 +120,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
   <div id="content">
     <div class="status" id="status">Looking for the inZOI Multiplayer program...</div>
     <div class="notice" id="notice"></div>
-    <div class="tabs"><span class="tab on" data-tab="people">People</span><span class="tab" data-tab="houses">Houses</span><span class="tab" data-tab="settings">Settings</span></div>
+    <div class="tabs"><span class="tab on" data-tab="people">People</span><span class="tab" data-tab="houses">Houses</span><span class="tab" data-tab="mods" id="tab-mods">Mods</span><span class="tab" data-tab="settings">Settings</span></div>
     <div class="pane on" id="pane-people">
       <div class="label">Players</div>
       <div class="players" id="players"></div>
@@ -130,12 +139,21 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
       <div class="label">Shared by friends</div>
       <div id="h-shared"></div>
     </div>
+    <div class="pane" id="pane-mods">
+      <div class="hint">Everyone needs the same mods to see each other's clothes and things. When someone hosts and
+        plays, the host's mods count; on a stand-alone server, everyone's mods are shared.</div>
+      <div class="mods-state" id="m-state"></div>
+      <div class="bar" id="m-bar"><div class="fill" id="m-fill"></div></div>
+      <div class="m-buttons" id="m-buttons"><span class="btn" id="m-yes">Download</span><span class="btn" id="m-no">No thanks</span></div>
+      <div class="label">Mods everyone uses</div>
+      <div id="m-list"></div>
+    </div>
     <div class="pane" id="pane-settings">
       <div class="field"><span>Your name</span><input id="s-name"></div>
       <div class="field"><span>Server</span><input id="s-server"></div>
       <div class="field"><span>Port</span><input id="s-port"></div>
       <div class="field"><span>Password</span><input id="s-password" type="password"></div>
-      <div class="toggle" id="s-sync"><span class="box"></span>Match the host's time of day (skips your clock forward)</div>
+      <div class="toggle" id="s-sync"><span class="box"></span>Follow the host's time of day, season and weather</div>
       <span class="btn" id="s-save">Save and reconnect</span>
     </div>
   </div>

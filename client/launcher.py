@@ -156,7 +156,8 @@ def show_addresses(port: int, password: str):
 async def run(mode: str, cfg: dict, comp):
     if mode != "play":
         args = argparse.Namespace(host="0.0.0.0", port=cfg["host_port"], password=cfg["host_password"],
-                                  motd=cfg["host_motd"], max_players=16, data=str(SERVER_DATA))
+                                  motd=cfg["host_motd"], max_players=16, data=str(SERVER_DATA),
+                                  hosted=mode == "host")         # host and play: the host's mods are everyone's
         try:
             hosted = await mpserver.start(args)          # noqa: F841 - keep it referenced while we run
         except OSError as e:
