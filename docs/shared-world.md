@@ -34,13 +34,24 @@ world kept on the server**, so buildings, NPCs, businesses and everyone's progre
 | 6 | NPCs: one player's game leads, the others' NPCs follow near players | later |
 | 7 | Businesses, live building, object states | later |
 
-## Game experiments needed (in a copy of the test save, while nobody plays)
+## Decided (2026-10-11)
 
-- E1: a world copied from another PC loads (header renamed; no account in the header, so it should).
-- E2: create a household + character from a profile in a loaded world, and possess it (`household.create`,
-  `household.add_member`, `character.possess`).
-- E3: move that household into a lot mid-game (no direct command found: `game.move_in` only works at a new game's
-  site selection; look for the in-game move flow or a Lua route).
-- E4: drive an existing character like a puppet (the controller spawns puppets today; adopt by entity id instead).
-- E5: autonomy per character (`autonomy.set_enable`) holds while they're driven.
-- E6: round trip: save, upload, download on "another PC", load: same world.
+- When several people played together: the world comes from the last to leave; each player's own household (needs,
+  skills, money, relationships, career) comes from that player's own copy.
+- Before a server restart: everyone's game is saved first (main menu for a moment), uploaded, and reloaded after.
+
+## Game experiments (in a copy of the test save)
+
+- E1 PASSED: a copied world (renamed header) is listed as a valid save and loads (`game.load folder=`). Saves start
+  paused after loading; the window must be in focus for the clock to run.
+- E2 PASSED: a household built from a player's profile (`RegisterHousehold`, the puppet code path) can be played:
+  `character.possess character_id= household_id=` switches to it with a normal HUD, needs, and its own money
+  (M 30,000, like a new family). It starts without a home.
+- E3 OPEN: moving that household into a lot mid-game. `game.list_move_in_sites` lists free lots for it, but
+  `game.move_in` only works at a new game's first house pick. Next: the game's own map "move in" flow (by hand, or
+  driven with ui.*).
+- E4 PASSED: the controller's new `adopt` op drives an existing Zoi (Bella) like a puppet (it walked the given
+  trail); `despawn` releases an adopted Zoi (free will back) instead of destroying it.
+- E5 PASSED: the controller's `freeze` (FB2AutonomyOptionManager individual toggles) works on any Zoi; the CLI
+  `autonomy.set_enable` reply is unreliable.
+- E6: copy + load proven (E1) and file transfer proven (mod sync); the world round trip is built in stage 1.
