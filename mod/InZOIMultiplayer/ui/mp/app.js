@@ -114,9 +114,11 @@
         if (text) { n.appendChild(document.createTextNode(text)); }
     }
 
+    var NOT_RUNNING = "The inZOI Multiplayer program isn't running. Open \"inZOI Multiplayer.exe\" and keep its window open while you play.";
+
     function render(s) {
         if (!s) {
-            $('status').textContent = 'The inZOI Multiplayer companion app isn\'t running. Start it, then come back.';
+            $('status').textContent = NOT_RUNNING;
             renderTitle(null);
             return;
         }
@@ -163,13 +165,13 @@
         if ($('s-port').value) { body.port = $('s-port').value; }
         if ($('s-password').value) { body.password = $('s-password').value; }
         post('/settings', body, function (r) {
-            showNotice(r ? (r.error || 'Saved - reconnecting...') : 'The companion app isn\'t running.');
+            showNotice(r ? (r.error || 'Saved - reconnecting...') : NOT_RUNNING);
         });
     });
     $('s-sync').addEventListener('click', function () {
         var on = $('s-sync').className.indexOf(' on') < 0;
         $('s-sync').className = 'toggle' + (on ? ' on' : '');
-        post('/settings', { sync_time: on }, function (r) { showNotice(r ? r.error : "The companion app isn't running."); });
+        post('/settings', { sync_time: on }, function (r) { showNotice(r ? r.error : NOT_RUNNING); });
     });
     ['s-name', 's-server', 's-port', 's-password'].forEach(function (id) {
         $(id).addEventListener('keydown', function (e) { e.stopPropagation(); });
@@ -189,7 +191,7 @@
 
     function loadHouses() {
         post('/houses', {}, function (h) {
-            if (!h || h.error) { showNotice(h ? h.error : "The companion app isn't running."); return; }
+            if (!h || h.error) { showNotice(h ? h.error : NOT_RUNNING); return; }
             var mine = $('h-mine'), shared = $('h-shared');
             clear(mine);
             clear(shared);

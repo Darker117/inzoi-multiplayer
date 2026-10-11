@@ -36,7 +36,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
@@ -51,7 +51,7 @@ def first_run_setup(cfg: dict, ask_server: bool = True):
     if name:
         cfg["name"] = name
     while ask_server and not cfg.get("server"):
-        addr = input("  Server address (ask whoever hosts, e.g. 192.168.1.20 or my-pi.local:24242): ").strip()
+        addr = input("  Server address (the friend who hosts gives it to you, e.g. 100.101.102.103): ").strip()
         if addr:
             host, _, port = addr.partition(":")
             cfg["server"] = host

@@ -2,80 +2,129 @@ inZOI Multiplayer  (beta)
 =========================
 
 Play inZOI together. Your friends' Zois show up in your world, looking exactly like theirs, and walk, sit, work
-out, dance and chat where they really are. Your Zoi shows up in their worlds the same way. Greet a friend's Zoi
-and it plays out on both screens.
+out, dance and chat where they really are. Your Zoi shows up in their worlds the same way.
 
-Each player keeps playing their own save. Friends appear as visitors in it, in their own household (they don't
-join your family, they don't age, get hungry or wander off: they only do what the real player does).
+Everyone keeps playing their own save. Friends appear in it as visitors: they only do what the real player does.
 
 
-WHAT YOU NEED
--------------
-- inZOI on Windows (everyone on the same game version).
-- This program, "inZOI Multiplayer.exe". Nothing else to install: the game mod is inside it.
-- One person hosts the server (see HOSTING below); everyone else connects to it.
+WHAT DO YOU WANT TO DO?
+-----------------------
+  A. JOIN A FRIEND     a friend runs the server, you just play                    (most people)
+  B. HOST AND PLAY     you run the server on your PC, and you play too
+  C. HOST ONLY         you run the server for your friends (a PC or a Raspberry Pi), without playing on it
 
-The first time you open it, Windows may say "Windows protected your PC". That's because the program is new and
-not code-signed. Click "More info", then "Run anyway".
+Everyone needs inZOI on Windows (all on the same game version) and the file "inZOI Multiplayer.exe".
+
+The first time you open "inZOI Multiplayer.exe", Windows may say "Windows protected your PC". That's only because
+the program is new and not code-signed. Click "More info", then "Run anyway".
 
 
-PLAYING
--------
-1. Put "inZOI Multiplayer.exe" anywhere (your Desktop is fine) and double-click it.
-2. Pick 1 (Play). The first time it asks for your name and the server address the host gave you.
-   Leave the window open while you play. Next time just press Enter: it remembers your choice.
-3. Start inZOI and load your save. The program installs the mod into the game and loads it by itself.
-4. The inZOI Multiplayer panel appears on the left of the screen in the game:
-   - People: who's online and where they are ("Here with you" / "In another city"), what they're doing,
-     Join (jump your Zoi right next to a friend's Zoi) and chat (messages also pop up as speech bubbles)
-   - Houses: share a house from your library, or add a friend's shared house to yours (see VISITING)
-   - Settings: your name, the server, its password, and "Match the host's time of day"
-   Drag it by the title bar, "_" folds it away.
+A. JOIN A FRIEND
+----------------
+Your host gives you:  the server address (it looks like 100.101.102.103)
+                      and, if you don't live together, a Tailscale invite link.
 
-Friends' Zois appear in your world when you're in the same city. To hang out, meet in the same place: travel
-there in the game, or press Join.
+1. Only if you got a Tailscale invite link (do this once):
+     - Install Tailscale from https://tailscale.com/download and sign in (a Google, Microsoft, Apple or
+       GitHub account is fine).
+     - Open the invite link and click Accept.
+   Tailscale has to be on (Connected) whenever you play.
+2. Double-click "inZOI Multiplayer.exe". Type 1 and press Enter.
+3. The first time, it asks two things:
+     Your name ........... what your friends will see
+     Server address ...... the address your host gave you
+   It remembers them: next time, just press Enter.
+4. Start inZOI and load your save. The inZOI Multiplayer panel appears on the left of the screen.
+   Keep the program's window open while you play. Close it when you're done.
+
+If your host uses a password: in the panel, click Settings, type it in Password, click Save.
+
+
+B. HOST AND PLAY
+----------------
+1. Double-click "inZOI Multiplayer.exe". Type 2 and press Enter.
+2. The first time, it asks for your name and a password (optional: press Enter for none).
+   If Windows asks whether inZOI Multiplayer may use the network, click Allow.
+3. The window shows the address to give your friends:
+     100.x.x.x ......... for friends anywhere, through Tailscale (see PLAYING OVER THE INTERNET below)
+     192.168.x.x ....... for friends in your home
+4. Start inZOI and load your save. Keep the window open while you and your friends play.
+
+
+C. HOST ONLY
+------------
+On a Windows PC:
+  Double-click "inZOI Multiplayer.exe", type 3 and press Enter. It works like B, without the game. The window
+  shows the address to give your friends. Keep it open while they play.
+
+On a Raspberry Pi or another Linux computer:
+  1. Copy the "server for Raspberry Pi or Linux" folder to it and run:   python3 inzoi_mp_server.py
+     (add  --password yourpassword  to use a password)
+  2. To keep it running all the time, even after a restart, follow the steps at the top of inzoi-mp.service.
+  3. The address for your friends is the Pi's Tailscale address (100.x.x.x: see below), or for friends in your
+     home, its address on your network (192.168.x.x).
+
+
+PLAYING OVER THE INTERNET (TAILSCALE)
+-------------------------------------
+Friends who don't live with the host connect through Tailscale. It's a free app that links their PCs to the
+server as if everyone were on the same home network. No router setup needed.
+
+The host does this once:
+  1. Install Tailscale on the computer that runs the server (https://tailscale.com/download) and sign in.
+  2. Open https://login.tailscale.com/admin/machines in a browser.
+  3. Find that computer in the list. Its address is the 100.x.x.x number on its row: that's the server address
+     for your friends.
+  4. Click the "..." at the end of its row, then "Share...", and copy the invite link.
+     Make a new link for each friend and send it to them with the 100.x.x.x address.
+
+Each friend does this once:
+  1. Install Tailscale (https://tailscale.com/download) and sign in.
+  2. Open the host's invite link and click Accept.
+  Then they follow "A. JOIN A FRIEND" with the 100.x.x.x address.
+
+(Without Tailscale: forward TCP port 24242 to the server in the host's router, and friends use the host's
+public IP address.)
+
+
+IN THE GAME
+-----------
+The inZOI Multiplayer panel (left of the screen; drag it by its title, "_" folds it away):
+  - People: who's online and what they're doing, Join (jump your Zoi next to a friend's Zoi), and chat
+    (messages also pop up as speech bubbles)
+  - Houses: share your house, or add a friend's house to your library (see VISITING)
+  - Settings: your name, the server address, the password, and "Match the host's time of day"
+
+Friends' Zois appear in your world when you're in the same city. To hang out, travel to the same place, or press
+Join.
 
 
 VISITING EACH OTHER AT HOME
 ---------------------------
-Everyone plays their own save, so your friend's house isn't in your world until you put it there:
-1. The host saves their home to their library (Build mode, save the lot to My Library), then shares it in the
-   panel's Houses tab.
-2. Visitors click "Add to library", then in Build mode place that house on the lot the panel names.
-3. Now when the host walks around their home, their Zoi walks through the same rooms on your screen.
-Friends' Zois are let in through your front door like invited guests.
+Everyone plays their own save, so a friend's house isn't in your world until you put it there:
+  1. The owner saves their home to their library (Build mode, save the lot to My Library), then shares it in the
+     panel's Houses tab.
+  2. Friends click "Add to library", then in Build mode place that house on the lot the panel names.
+  3. Now when the owner walks around their home, their Zoi walks through the same rooms on your screen.
 
 
-HOSTING
--------
-The server is tiny and needs no game. Anyone in the group can host it, with the same program:
-- Pick 2 (Host and play) to run the server on your PC and play on it, or 3 (Host only) to just run the server,
-  e.g. on a PC that stays on. The window then shows the address friends should enter. Keep it open while
-  friends play.
-- The first time, it asks for a password (optional). Friends type it in the panel's Settings.
-- If Windows asks whether inZOI Multiplayer may use the network, allow it.
-- Friends on other networks (over the internet) need a way in. Easiest is Tailscale (free):
-    1. The host installs Tailscale (https://tailscale.com/download) on the server PC and, in the Tailscale admin
-       console (Machines), uses "Share..." on that PC to get an invite link for each friend.
-    2. Friends install Tailscale, sign in, and open the invite link.
-    3. Friends enter the server's Tailscale name (the window shows it, e.g. my-pc.tailxxxxx.ts.net).
-  The other way is forwarding port 24242 (TCP) to the host in the router.
-- On a Raspberry Pi or Linux box: copy the "server for Raspberry Pi or Linux" folder over and run
-      python3 inzoi_mp_server.py --password secret
-  To keep it running all the time, see the notes at the top of inzoi-mp.service.
-- Shortcuts: "inZOI Multiplayer.exe" --play, --host or --host-only skips the menu; with --host/--host-only,
-  --port 24242, --password secret and --motd "Welcome!" set up your server.
+IF SOMETHING'S WRONG
+--------------------
+- The panel says the program isn't running: open "inZOI Multiplayer.exe" and keep its window open.
+- "Can't reach the server": check the address (panel: Settings). If you play over the internet, check that
+  Tailscale is on (Connected) on your PC. Ask the host whether their server window is open.
+- To switch between joining and hosting: close the program and open it again. It shows the menu every time
+  (Enter picks what you chose last time).
+- Your antivirus removed the program: restore it and allow it. It's flagged only because it's new and unsigned.
+- Logs (send them along when you report a problem): %APPDATA%\inzoi-mp\companion.log
 
 
 GOOD TO KNOW
 ------------
-- Close the window (or press Ctrl+C in it) when you're done, so friends' Zois leave your world cleanly. If the
-  game ever saved while friends were visiting, the program tidies up next time.
-- Building, menus and the map pause the game; friends' Zois wait until you're back.
-- Objects in public places are the same in everyone's game, so a friend working out at the gym does it on the
-  same machine in your world. Inside homes things can differ, so some actions only show as the motion.
-- Settings and logs: %APPDATA%\inzoi-mp (companion.log; a hosted server keeps its data in the "server" folder).
-- Some antivirus programs distrust any new unsigned program. If yours quarantines it, restore it and allow it.
+- Building, menus and the map pause the game. Friends' Zois wait until you're back.
+- Objects in public places are the same in everyone's game, so a friend working out at the gym uses the same
+  machine in your world. Homes can differ, so there some actions only show as the motion.
+- Close the program when you're done (the window's X or Ctrl+C), so friends' Zois leave your world cleanly.
 
 
 UNINSTALL

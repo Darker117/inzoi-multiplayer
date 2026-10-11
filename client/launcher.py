@@ -33,9 +33,9 @@ import companion  # noqa: E402
 import inzoi_mp_server as mpserver  # noqa: E402
 
 log = logging.getLogger("launcher")
-MENU = [("play", "Play", "join a friend's server"),
-        ("host", "Host and play", "run the server on this PC and play on it"),
-        ("host-only", "Host only", "just run the server for friends (no game needed)")]
+MENU = [("play", "Join a friend", "connect to the server your friend hosts"),
+        ("host", "Host and play", "your friends connect to you, and you play too"),
+        ("host-only", "Host only", "just run the server for your friends (no game needed)")]
 SERVER_DATA = companion.CONFIG_DIR / "server"
 TAILNET = ipaddress.ip_network("100.64.0.0/10")
 
@@ -51,9 +51,9 @@ def choose_mode(cfg: dict) -> str:
     for i, (mode, title, what) in enumerate(MENU, 1):
         if mode == "play" and cfg.get("server"):
             what += f" ({cfg['server']})"
-        print(f"    {i}  {title:<15}{what}")
+        print(f"    {i}  {title:<16}{what}")
     while True:
-        pick = input(f"\n  Pick 1-3 and press Enter [{default}]: ").strip() or str(default)
+        pick = input(f"\n  Type 1, 2 or 3 and press Enter [{default}]: ").strip() or str(default)
         if pick in ("1", "2", "3"):
             print()
             return modes[int(pick) - 1]
@@ -68,9 +68,9 @@ def host_settings(cfg: dict, args) -> tuple[int, str, str]:
     if args.motd is not None:
         cfg["host_motd"] = args.motd
     if "host_password" not in cfg and interactive():
-        cfg["host_password"] = input("  A password for your server, so only friends can join (Enter for none): ").strip()
+        cfg["host_password"] = input("  Pick a password so only your friends can join (or just press Enter for none): ").strip()
         if cfg["host_password"]:
-            print("  Friends type it in the in-game panel: Settings, Password.")
+            print("  Friends type it in the in-game panel: Settings, Password, then Save.")
         print()
     cfg.setdefault("host_port", 24242)
     cfg.setdefault("host_password", "")
@@ -104,19 +104,20 @@ def tailscale_self() -> tuple[str | None, str | None]:
     return (me.get("DNSName") or "").rstrip(".") or None, ips[0] if ips else None
 
 
-def show_addresses(port: int):
+def show_addresses(port: int, password: str):
     at = "" if port == 24242 else f":{port}"
-    print(f"\n  Your server is running. Friends put this address in the panel's Settings, Server:")
+    _, ts_ip = tailscale_self()                          # the IP, not the name: a renamed PC gets a new name
     lan = lan_address()
+    print("\n  Your server is running. Tell your friends to type this as the server address:\n")
+    if ts_ip:
+        print(f"    {ts_ip + at:<22} friends anywhere (over Tailscale: share this PC with them in Tailscale first)")
     if lan:
-        print(f"    {lan + at:<44} friends on your home network")
-    name, ts_ip = tailscale_self()
-    if name or ts_ip:
-        print(f"    {(name or ts_ip) + at:<44} friends anywhere, over Tailscale (share this PC with them in Tailscale)")
-    else:
-        print(f"  Friends on other networks need Tailscale (see the README), or port {port} (TCP) forwarded to this")
-        print("  PC in your router.")
-    print("  If Windows asks whether inZOI Multiplayer may use the network, allow it.")
+        print(f"    {lan + at:<22} friends in your home (on the same Wi-Fi or network)")
+    if not ts_ip:
+        print("\n  Friends outside your home can't reach this PC yet: install Tailscale here and share this PC with")
+        print(f"  them (see the README), or forward port {port} (TCP) to this PC in your router.")
+    print(f"\n  Password: {password}" if password else "\n  No password: anyone who can reach this PC can join.")
+    print("  If Windows asks whether inZOI Multiplayer may use the network, click Allow.")
     print("  Keep this window open while friends play.\n")
 
 
@@ -129,8 +130,12 @@ async def run(mode: str, cfg: dict, comp):
         except OSError as e:
             raise SystemExit(f"Can't host on port {args.port}: {e.strerror or e}. Is a server already running on "
                              "this PC?") from None
-        show_addresses(args.port)
+        show_addresses(args.port, args.password)
     if comp:
+        if mode == "play":
+            print(f"\n  Connecting to {cfg['server']} as {cfg['name']}. (To change either: Settings in the in-game panel.)")
+        print("  Now start inZOI and load your save: the inZOI Multiplayer panel appears in the game.")
+        print("  Keep this window open while you play, and close it when you're done.\n")
         await comp.run()
     else:
         await asyncio.Event().wait()
