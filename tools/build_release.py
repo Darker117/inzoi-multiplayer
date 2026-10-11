@@ -2,6 +2,10 @@
 and a zip with that exe, the README and the server script for a Raspberry Pi / Linux box.
 
     python tools/build_release.py
+    python tools/build_release.py --publish notes.md     # and put it on GitHub as release v<version>
+
+Every player's program updates itself from the latest GitHub release (client/updater.py), so publishing is how an
+update reaches everyone. notes.md: its first line (without "#") is the release title, the rest its description.
 
 The first run creates build/venv with PyInstaller in it (needs the internet once). Output in dist/:
     inZOI-Multiplayer.exe               the program on its own
@@ -183,7 +187,23 @@ def main():
     shutil.copy2(exe, DIST / "inZOI-Multiplayer.exe")
     print(f"{DIST / 'inZOI-Multiplayer.exe'}  ({exe.stat().st_size // 1024} KB)")
     print(f"{zpath}  ({zpath.stat().st_size // 1024} KB)")
+    return version, zpath
+
+
+def publish(version: str, zpath: Path, notes: Path):
+    """GitHub release v<version> with the exe (what programs update to) and the zip."""
+    text = notes.read_text("utf-8").strip()
+    title, _, body = text.partition("\n")
+    subprocess.run(["gh", "release", "create", f"v{version}", str(DIST / "inZOI-Multiplayer.exe"), str(zpath),
+                    "--title", title.lstrip("#").strip(), "--notes", body.strip()], check=True, cwd=ROOT)
+    print(f"published v{version}: every player's program offers it within a couple of hours, or at its next start")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--publish", type=Path, metavar="NOTES", help="also create the GitHub release, with these notes")
+    a = ap.parse_args()
+    v, z = main()
+    if a.publish:
+        publish(v, z, a.publish)

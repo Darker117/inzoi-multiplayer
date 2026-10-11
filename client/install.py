@@ -17,7 +17,10 @@ MAILBOX_FILES = {"MPCmd.lua", "MPBulk.lua", "inject.json"}
 
 
 def _documents() -> Path:
-    """The real Documents folder (it can be redirected, e.g. into OneDrive)."""
+    """The real Documents folder (it can be redirected, e.g. into OneDrive). Tests set INZOI_MP_DOCUMENTS to a
+    folder of their own, so nothing they do reaches the real game: its mod, mailbox, mods and saves all live here."""
+    if os.environ.get("INZOI_MP_DOCUMENTS"):
+        return Path(os.environ["INZOI_MP_DOCUMENTS"])
     if os.name == "nt":
         try:
             import ctypes

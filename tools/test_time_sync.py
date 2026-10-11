@@ -11,6 +11,11 @@ import sys
 import time
 from pathlib import Path
 
+import os  # noqa: E402
+import tempfile  # noqa: E402
+os.environ["INZOI_MP_DOCUMENTS"] = tempfile.mkdtemp()                 # never the real game's mod folder
+os.environ["INZOI_MP_GAME_URL"] = "http://127.0.0.1:9/mcp"
+os.environ["APPDATA"] = tempfile.mkdtemp()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
 import companion  # noqa: E402
 

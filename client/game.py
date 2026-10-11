@@ -1,9 +1,10 @@
 """Everything the companion asks the running game, through its built-in control server (http://127.0.0.1:11212/mcp)."""
 import json
 import math
+import os
 import urllib.request
 
-GAME_MCP = "http://127.0.0.1:11212/mcp"
+GAME_MCP = os.environ.get("INZOI_MP_GAME_URL") or "http://127.0.0.1:11212/mcp"     # (tests point it elsewhere)
 
 
 # Interactions that are just getting somewhere: a puppet's own follow logic covers them.

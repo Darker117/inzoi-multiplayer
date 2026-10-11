@@ -33,6 +33,7 @@ import houses  # noqa: E402
 import install  # noqa: E402
 import mods  # noqa: E402
 import saves  # noqa: E402
+import updater  # noqa: E402
 import webui  # noqa: E402
 from game import Game, GameError, describe_act  # noqa: E402
 from lua_data import Registry  # noqa: E402
@@ -41,7 +42,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -231,6 +232,9 @@ class Companion:
         self.auto_loaded = False     # the multiplayer save was loaded for this run already
         self.save_box = None         # the save question/notice the panel shows: {key, text, buttons}
         self.save_busy = False       # making the multiplayer copy / switching saves
+        self.update = None           # a newer version: {version, title, state, done, total, path}
+        self.update_box = None       # the update question the panel shows: {key, text, buttons}
+        self.restart_args = ["--play"]   # how the launcher started me (an update restarts the same way)
         install.MAILBOX_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ helpers
@@ -265,6 +269,7 @@ class Companion:
         asyncio.create_task(self.game_loop())
         asyncio.create_task(self.mailbox_loop())
         asyncio.create_task(self.mods_loop())
+        asyncio.create_task(self.update_loop())
         backoff = 2
         while True:
             try:
@@ -881,6 +886,85 @@ class Companion:
         except GameError as e:
             log.warning("couldn't load the multiplayer save: %s", e)
 
+    # ------------------------------------------------------------------ updates
+    async def update_loop(self):
+        """Look for a newer release on GitHub now and then; download it, then ask whether to restart into it."""
+        await asyncio.sleep(20)
+        while True:
+            if not self.update or self.update["state"] in ("error", "available"):
+                try:
+                    await self.check_update()
+                except (OSError, ValueError) as e:
+                    log.debug("update check: %s", e)
+            await asyncio.sleep(2 * 3600)
+
+    async def check_update(self):
+        info = await self.g(updater.latest, VERSION)
+        if not info:
+            return
+        u = self.update = {**info, "state": "downloading", "done": 0, "total": info["size"], "path": None}
+        if not updater.frozen():
+            u["state"] = "available"
+            log.info("inZOI Multiplayer %s is out on GitHub (you're running %s from source)", u["version"], VERSION)
+            return
+        log.info("downloading inZOI Multiplayer %s", u["version"])
+        bar = ProgressBar(f"Downloading update {u['version']}", u["total"])
+
+        def progress(n):
+            u["done"] += n
+            bar.add(n)
+        try:
+            u["path"] = await self.g(updater.download, info, progress)
+        except (OSError, ValueError) as e:
+            u["state"] = "error"
+            log.warning("downloading the update failed: %s", e)
+            return
+        bar.finish()
+        u["state"] = "ready"
+        self.ask_update()
+
+    def ask_update(self):
+        u = self.update
+        text = (f"inZOI Multiplayer {u['version']} is ready ({u['title']}). Restart the program now to update? "
+                "Friends' Zois leave your game for a few seconds; the game itself keeps running.")
+        self.update_box = {"key": u["version"], "text": text,
+                           "buttons": [{"id": "restart", "label": "Restart now"}, {"id": "later", "label": "Later"}]}
+        self.console_ask(f"\n  ------------------------------------------------------------------------------\n"
+                         f"  {text}\n  Type y (yes) or n (later) and press Enter [y]: ",
+                         lambda a: self.update_action(u["version"], "later" if a.startswith("n") else "restart"))
+
+    def update_action(self, key: str, action: str):
+        u = self.update
+        if not u or u["version"] != key or u["state"] != "ready":
+            return
+        self.update_box = None
+        if action == "later":
+            u["state"] = "later"
+            log.info("the update waits: it's applied the next time you start the program")
+            return
+        asyncio.get_running_loop().create_task(self.restart_into_update())
+
+    async def restart_into_update(self):
+        u = self.update
+        u["state"] = "restarting"
+        log.info("restarting into inZOI Multiplayer %s", u["version"])
+        if self.writer:
+            if self.hosting:
+                try:
+                    await self.send({"t": "chat", "text": "(The host is updating inZOI Multiplayer: back in a moment.)"})
+                except (OSError, ConnectionError):
+                    pass
+        self.despawn_all()
+        await asyncio.sleep(1.5)                       # let the game take friends' Zois out first
+        try:
+            await self.g(updater.apply, u["path"], self.restart_args)
+        except OSError as e:
+            u["state"] = "error"
+            log.warning("couldn't apply the update: %s", e)
+            return
+        logging.shutdown()
+        os._exit(0)
+
     # ------------------------------------------------------------------ mods
     async def mods_loop(self):
         """Tell the server which mods this PC has (again whenever they change), share their files when friends get
@@ -893,9 +977,10 @@ class Companion:
                     self.mods_local = await self.g(mods.scan, mods.MODS_DIR, hashes)
                     last_scan = time.time()
                     mine = [{k: v for k, v in m.items() if k != "enabled"} for m in self.mods_local if m["enabled"]]
-                    if sent_for != self.connected_at or mine != sent:
+                    sig = sorted((m["id"], sorted(mods.fingerprint(m))) for m in mine)    # content, not manifests
+                    if sent_for != self.connected_at or sig != sent:
                         await self.send({"t": "mods", "mods": mine})
-                        sent_for, sent = self.connected_at, mine
+                        sent_for, sent = self.connected_at, sig
                         log.info("your mods: %d", len(mine))
                     self.check_mods()
                     await self.share_mods(mine)
@@ -1111,7 +1196,9 @@ class Companion:
                     "host": self.leader == self.me_id, "sync_time": bool(self.cfg.get("sync_time", True)),
                     "players": players, "chat": list(self.chat)[-30:], "mods": self.mods_status(),
                     "save": {"name": self.mp_name() if self.cfg.get("mp_save") else None,
-                             "active": self.mp_active(), "box": self.save_box}}
+                             "active": self.mp_active(), "box": self.save_box},
+                    "update": {**{k: (self.update or {}).get(k) for k in ("version", "state", "done", "total")},
+                               "box": self.update_box}}
 
         async def chat(body):
             text = str(body.get("text", "")).strip()[:500]
@@ -1195,9 +1282,13 @@ class Companion:
             self.save_action(str(body.get("key", "")), str(body.get("action", "")))
             return {"ok": True, "box": self.save_box}
 
+        async def update_answer(body):
+            self.update_action(str(body.get("key", "")), str(body.get("action", "")))
+            return {"ok": True, "box": self.update_box}
+
         return {"/status": status, "/chat": chat, "/join": join, "/settings": settings,
                 "/houses": house_list, "/share": share, "/add_house": add_house, "/mods": mods_answer,
-                "/save": save_answer}
+                "/save": save_answer, "/update": update_answer}
 
 
 def setup_logging(verbose: bool):

@@ -31,6 +31,7 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE), str(HERE.parent / "server")]
 import companion  # noqa: E402
 import inzoi_mp_server as mpserver  # noqa: E402
+import updater  # noqa: E402
 
 log = logging.getLogger("launcher")
 MENU = [("play", "Join a friend", "connect to the server your friend hosts"),
@@ -153,6 +154,20 @@ def show_addresses(port: int, password: str):
     print("  Keep this window open while friends play.\n")
 
 
+async def fetch_update():
+    """Host only (no game): download a newer version now and then; it's applied when the program next starts."""
+    while updater.frozen():
+        try:
+            info = await asyncio.to_thread(updater.latest, companion.VERSION)
+            if info and not updater.pending(companion.VERSION):
+                await asyncio.to_thread(updater.download, info)
+                log.info("inZOI Multiplayer %s is downloaded: it's applied the next time you start the program",
+                         info["version"])
+        except (OSError, ValueError) as e:
+            log.debug("update check: %s", e)
+        await asyncio.sleep(2 * 3600)
+
+
 async def run(mode: str, cfg: dict, comp):
     if mode != "play":
         args = argparse.Namespace(host="0.0.0.0", port=cfg["host_port"], password=cfg["host_password"],
@@ -169,10 +184,14 @@ async def run(mode: str, cfg: dict, comp):
             print(f"\n  Connecting to {server_text(cfg)} as {cfg['name']}.")
             print("  (Wrong address or name? Change it in the in-game panel's Settings, or close this window, open")
             print("  the program again and type 4.)")
-        print("  Now start inZOI and load your save: the inZOI Multiplayer panel appears in the game.")
+        if cfg.get("mp_save"):
+            print("  Now start inZOI and wait at the main menu: your multiplayer save loads by itself.")
+        else:
+            print("  Now start inZOI and load the save you want to play with friends (you'll be asked about it).")
         print("  Keep this window open while you play, and close it when you're done.\n")
         await comp.run()
     else:
+        asyncio.create_task(fetch_update())
         await asyncio.Event().wait()
 
 
@@ -199,6 +218,14 @@ def main():
         if k32.GetConsoleMode(stdin, ctypes.byref(mode)):
             k32.SetConsoleMode(stdin, (mode.value & ~0x40) | 0x80)
     companion.setup_logging(args.verbose)
+    updater.clean_old()
+    waiting = updater.pending(companion.VERSION) if updater.frozen() else None
+    if waiting and interactive():
+        version = waiting.stem.split("inZOI-Multiplayer-", 1)[1]
+        answer = companion.ask(f"\n  inZOI Multiplayer {version} was downloaded last time. Update now? Type y or n [y]: ")
+        if not answer.strip().lower().startswith("n"):
+            updater.apply(waiting, sys.argv[1:])
+            return
     saved = companion.read_config()
     mode = args.mode or (None if interactive() else saved.get("mode", "play"))
     while not mode:
@@ -220,6 +247,7 @@ def main():
     comp = None
     if mode != "host-only":
         comp = companion.Companion(cfg)
+        comp.restart_args = [f"--{mode}"]
         if mode == "host":
             comp.hosting = (int(cfg["host_port"]), cfg["host_password"])
         companion.on_console_close(comp.despawn_all)

@@ -23,6 +23,8 @@ import install
 MODS_DIR = Path(os.environ.get("INZOI_MP_MODS_DIR") or install.INSTALL_DIR.parents[1])   # Documents/inZOI/Mods
 DATA = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
 CHUNK = 512 * 1024
+MANIFEST = "mod_manifest.json"
+RUNTIME = {".cfg"}               # what mods write while the game runs (uimod.cfg_save): not part of the mod
 log = logging.getLogger("mods")
 
 
@@ -88,7 +90,8 @@ def scan(root: Path | None = None, hashes: Hashes | None = None) -> list[dict]:
         folders.append(folder)
         files = []
         for f in sorted(folder.rglob("*")):
-            if f.is_file() and not any(p.startswith(".") for p in f.relative_to(folder).parts):
+            if f.is_file() and f.suffix.lower() not in RUNTIME and not any(p.startswith(".") for p in
+                                                                           f.relative_to(folder).parts):
                 try:
                     files.append({"p": f.relative_to(folder).as_posix(), "h": hashes.get(f), "s": f.stat().st_size})
                 except OSError:
@@ -101,7 +104,9 @@ def scan(root: Path | None = None, hashes: Hashes | None = None) -> list[dict]:
 
 
 def fingerprint(mod: dict) -> frozenset:
-    return frozenset((f["p"], f["h"]) for f in mod["files"])
+    """What makes two copies of a mod the same. Not mod_manifest.json: the game rewrites it on every PC (load order,
+    enabled, validated game version), so it differs between players who have the very same mod."""
+    return frozenset((f["p"], f["h"]) for f in mod["files"] if f["p"] != MANIFEST)
 
 
 def missing(modset: list[dict], local: list[dict]) -> list[dict]:

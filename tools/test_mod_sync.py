@@ -71,7 +71,8 @@ async def scenario(name: str, hosted: bool):
         port = srv.sockets[0].getsockname()[1]
 
         def spawn(role, mods_dir, hosting):
-            env = {**os.environ, "APPDATA": str(tmp / f"{role}-appdata"), "INZOI_MP_MODS_DIR": str(mods_dir)}
+            env = {**os.environ, "APPDATA": str(tmp / f"{role}-appdata"), "INZOI_MP_MODS_DIR": str(mods_dir),
+                   "INZOI_MP_DOCUMENTS": str(tmp / f"{role}-documents"), "INZOI_MP_GAME_URL": "http://127.0.0.1:9/mcp"}
             return asyncio.create_subprocess_exec(
                 sys.executable, __file__, "--player", role, "--port", str(port), "--out", str(tmp / f"{role}.json"),
                 *(["--hosting"] if hosting else []), env=env)

@@ -91,6 +91,8 @@ class StandIn:
 async def main():
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["APPDATA"] = str(Path(tmp) / "appdata")
+        os.environ["INZOI_MP_DOCUMENTS"] = str(Path(tmp) / "Documents")
+        os.environ["INZOI_MP_GAME_URL"] = "http://127.0.0.1:9/mcp"
         import companion
         import saves
         saves.SAVES, saves.MODSAVE = Path(tmp) / "SaveGames", Path(tmp) / "ModSave"

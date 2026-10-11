@@ -132,6 +132,7 @@
         renderTitle(s);
         renderMods(s.mods);
         renderSave(s.save);
+        renderBox('update', s.update && s.update.box);
         $('s-version').textContent = 'inZOI Multiplayer ' + s.version +
             (s.save && s.save.name ? ' - multiplayer save: ' + s.save.name : '');
         $('s-sync').className = 'toggle' + (s.sync_time ? ' on' : '');
@@ -181,26 +182,27 @@
         $(id).addEventListener('keydown', function (e) { e.stopPropagation(); });
     });
 
-    // ------------------------------------------------------------------ the multiplayer save
-    var saveKey = null;
-    function renderSave(sv) {
-        var box = sv && sv.box, wrap = $('save-box'), buttons = $('save-buttons');
+    // ------------------------------------------------------------------ questions: the multiplayer save, updates
+    var shownBoxes = {};
+    function renderBox(name, box) {                             // name: 'save' or 'update' (also its endpoint)
+        var wrap = $(name + '-box'), buttons = $(name + '-buttons');
         wrap.style.display = box ? 'block' : 'none';
-        if (!box) { saveKey = null; return; }
-        $('save-text').textContent = box.text;
-        if (saveKey === box.key + box.text) { return; }       // keep the buttons while they're being clicked
-        saveKey = box.key + box.text;
+        if (!box) { shownBoxes[name] = null; return; }
+        $(name + '-text').textContent = box.text;
+        if (shownBoxes[name] === box.key + box.text) { return; }   // keep the buttons while they're being clicked
+        shownBoxes[name] = box.key + box.text;
         clear(buttons);
         box.buttons.forEach(function (b) {
             var btn = el('span', 'btn', b.label);
             btn.addEventListener('click', function () {
-                post('/save', { key: box.key, action: b.id }, function (r) {
-                    if (!r) { showNotice(NOT_RUNNING); } else { saveKey = null; poll(); }
+                post('/' + name, { key: box.key, action: b.id }, function (r) {
+                    if (!r) { showNotice(NOT_RUNNING); } else { shownBoxes[name] = null; poll(); }
                 });
             });
             buttons.appendChild(btn);
         });
     }
+    function renderSave(sv) { renderBox('save', sv && sv.box); }
 
     // ------------------------------------------------------------------ mods
     var modsKey = null;

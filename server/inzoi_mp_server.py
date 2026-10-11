@@ -30,7 +30,7 @@ import signal
 import time
 from pathlib import Path
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 PROTOCOL = 1
 MAX_LINE = 32 * 1024 * 1024        # house snapshots can be large
 PING_EVERY = 15                    # seconds between keepalives
@@ -130,6 +130,11 @@ class Store:
         return self.root / "blobs" / sha
 
 
+def content(mod: dict) -> set:
+    """A mod's files, leaving out mod_manifest.json: the game rewrites it on each PC (load order, enabled...)."""
+    return {(f["p"], f["h"]) for f in mod["files"] if f["p"] != "mod_manifest.json"}
+
+
 def clean_mods(raw) -> list[dict]:
     """A player's mod list, keeping only well-formed entries (they are stored and passed on to other players)."""
     out = []
@@ -203,6 +208,7 @@ class Server:
         self.hosted = hosted
         self.host_id: str | None = None
         self.modset_sent: str | None = None
+        self.conns: set[Client] = set()        # every open connection, players' and file transfers'
 
     # ------------------------------------------------------------------ plumbing
     async def broadcast(self, msg: dict, exclude: Client | None = None) -> None:
@@ -210,6 +216,7 @@ class Server:
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         c = Client(self, reader, writer)
+        self.conns.add(c)
         log.info("connection from %s", c.addr)
         try:
             while not c.closed:
@@ -235,6 +242,7 @@ class Server:
         except (ConnectionError, OSError):
             pass
         finally:
+            self.conns.discard(c)
             await c.close()
             await self.drop(c)
 
@@ -399,7 +407,7 @@ class Server:
         for pid, d in sorted(lists.items(), key=lambda kv: kv[1].get("updated", 0)):
             for m in d.get("mods", []):
                 same, name = merged.get(m["id"]), d.get("name", pid)
-                if same and same["files"] == m["files"]:
+                if same and content(same) == content(m):            # the same mod, whatever each PC's manifest says
                     same["by"].append(name)
                 elif not same or m.get("built", "") >= same.get("built", ""):     # an older build never wins
                     merged[m["id"]] = {**m, "by": [name]}
@@ -490,6 +498,7 @@ async def start(args):
     addrs = ", ".join(str(s.getsockname()[:2]) for s in srv.sockets)
     log.info("inZOI Multiplayer server %s listening on %s (data: %s)%s", VERSION, addrs, store.root,
              " - password required" if args.password else "")
+    srv.mp_server = server
     return srv, asyncio.ensure_future(server.keepalive())
 
 
@@ -502,10 +511,19 @@ async def main_async(args) -> None:
             loop.add_signal_handler(sig, stop.set)
         except (NotImplementedError, RuntimeError):     # Windows: Ctrl+C raises KeyboardInterrupt instead
             pass
-    async with srv:
-        await stop.wait()
-    ka.cancel()
+    await stop.wait()
     log.info("shutting down")
+    await srv.mp_server.broadcast({"t": "chat", "id": None, "name": "Server", "time": now(),
+                                   "text": "The server is restarting. You'll be reconnected in a moment."})
+    await asyncio.sleep(0.5)
+    srv.close()
+    for c in list(srv.mp_server.conns):              # don't wait for players to hang up: a restart is instant
+        await c.close()
+    ka.cancel()
+    try:
+        await asyncio.wait_for(srv.wait_closed(), 5)
+    except asyncio.TimeoutError:
+        pass
 
 
 def main() -> None:

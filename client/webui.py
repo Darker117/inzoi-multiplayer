@@ -7,9 +7,10 @@ Runs inside the companion's asyncio loop; `routes` maps a path to an async funct
 import asyncio
 import json
 import logging
+import os
 
 log = logging.getLogger("webui")
-PORT = 24243
+PORT = int(os.environ.get("INZOI_MP_PANEL_PORT") or 24243)      # the in-game panel only knows 24243 (tests: other)
 
 
 async def serve(routes: dict, host: str = "127.0.0.1", port: int = PORT):
