@@ -97,7 +97,54 @@ async def run():
         await srv.wait_closed()
     await mods_shared()
     await mods_hosted()
+    await shared_world()
     print("all server tests passed")
+
+
+async def shared_world():
+    """The world save: offered, uploaded, committed as version 1; a stale upload is refused; others can download it;
+    a restart announcement (only from the server's own machine) reaches everyone."""
+    with tempfile.TemporaryDirectory() as tmp:
+        server = mp.Server(mp.Store(Path(tmp)))
+        srv = await asyncio.start_server(server.handle, "127.0.0.1", 0, limit=mp.MAX_LINE)
+        port = srv.sockets[0].getsockname()[1]
+        a, b = Fake(port, "Ana"), Fake(port, "Ben")
+        wa = await a.connect()
+        assert wa["world_save"] is None
+        await b.connect()
+        await a.expect("joined")
+        save, pic = b"IZMS-world-data" * 1000, b"PNG"
+        files = [{"p": "world.usvx", "h": sha(save), "s": len(save)}, {"p": "pictures/Portrait/1.png", "h": sha(pic), "s": 3}]
+        await a.send({"t": "world_save_offer", "files": files})
+        assert sorted((await a.expect("world_save_offer"))["need"]) == sorted([sha(save), sha(pic)])
+        fa = await files_conn(port, a)
+        assert (await upload(fa, save, step=len(save)))["t"] == "blob_ok"
+        await a.send({"t": "world_save_put", "files": files, "base": 0, "name": "Sawyer"})
+        assert (await a.expect("world_save_put"))["ok"] is False                     # a file is still missing
+        assert (await upload(fa, pic))["t"] == "blob_ok"
+        await a.send({"t": "world_save_put", "files": files, "base": 0, "name": "Sawyer"})
+        put = await a.expect("world_save_put")
+        assert put["ok"] and put["version"] == 1
+        ws = await b.expect("world_save")
+        assert ws["version"] == 1 and ws["by"] == "Ana" and ws["name"] == "Sawyer"
+        fb = await files_conn(port, b)
+        assert await download(fb, sha(save)) == save
+        await b.send({"t": "world_save_offer", "files": files})
+        await b.expect("world_save_offer")
+        await b.send({"t": "world_save_put", "files": files, "base": 0})               # based on an old version
+        stale = await b.expect("world_save_put")
+        assert stale["ok"] is False and stale["version"] == 1
+        r, w = await asyncio.open_connection("127.0.0.1", port)                        # the restart announcement
+        w.write(b'{"t": "announce_restart", "in": 30}\n')
+        await w.drain()
+        assert json.loads(await r.readline())["t"] == "ok"
+        rs = await a.expect("restart_soon")
+        assert rs["in"] == 30 and rs["keeper"] == wa["id"]
+        for x in (a, b, fa, fb):
+            x.w.close()
+        w.close()
+        srv.close()
+        await srv.wait_closed()
 
 
 def sha(data: bytes) -> str:

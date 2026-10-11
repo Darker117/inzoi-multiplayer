@@ -133,6 +133,7 @@
         renderMods(s.mods);
         renderSave(s.save);
         renderBox('update', s.update && s.update.box);
+        renderBox('world', s.world && s.world.box);
         $('s-version').textContent = 'inZOI Multiplayer ' + s.version +
             (s.save && s.save.name ? ' - multiplayer save: ' + s.save.name : '');
         $('s-sync').className = 'toggle' + (s.sync_time ? ' on' : '');

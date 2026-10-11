@@ -129,6 +129,20 @@ class Store:
     def blob(self, sha: str) -> Path:
         return self.root / "blobs" / sha
 
+    # The shared world: one game save everyone plays, as files (blobs) plus a version that goes up with each upload.
+    def world_save(self) -> dict | None:
+        return self._load(self.root / "world_save.json", None)
+
+    def set_world_save(self, meta: dict) -> None:
+        self._save(self.root / "world_save.json", meta)
+
+
+def clean_files(raw, limit: int = 5000) -> list[dict]:
+    """[{p, h, s}] from a player: relative path, sha256, size. Malformed entries are dropped."""
+    return [{"p": str(f["p"])[:400], "h": f["h"], "s": int(f["s"])} for f in (raw if isinstance(raw, list) else [])[:limit]
+            if isinstance(f, dict) and SHA.fullmatch(str(f.get("h", ""))) and isinstance(f.get("s"), int)
+            and 0 <= f["s"] < 1 << 32 and f.get("p")]
+
 
 def content(mod: dict) -> set:
     """A mod's files, leaving out mod_manifest.json: the game rewrites it on each PC (load order, enabled...)."""
@@ -141,9 +155,7 @@ def clean_mods(raw) -> list[dict]:
     for m in raw if isinstance(raw, list) else []:
         if not isinstance(m, dict) or not isinstance(m.get("files"), list) or not str(m.get("id", "")).strip():
             continue
-        files = [{"p": str(f["p"])[:400], "h": f["h"], "s": int(f["s"])} for f in m["files"][:5000]
-                 if isinstance(f, dict) and SHA.fullmatch(str(f.get("h", ""))) and isinstance(f.get("s"), int)
-                 and 0 <= f["s"] < 1 << 32 and f.get("p")]
+        files = clean_files(m["files"])
         if files:
             out.append({"id": str(m["id"])[:200], "name": str(m.get("name") or m["id"])[:200],
                         "version": str(m.get("version", ""))[:100], "built": str(m.get("built", ""))[:40],
@@ -209,6 +221,7 @@ class Server:
         self.host_id: str | None = None
         self.modset_sent: str | None = None
         self.conns: set[Client] = set()        # every open connection, players' and file transfers'
+        self.world_offers: dict[str, dict] = {}   # player id -> {sha: size} of the world files they're uploading
 
     # ------------------------------------------------------------------ plumbing
     async def broadcast(self, msg: dict, exclude: Client | None = None) -> None:
@@ -259,6 +272,10 @@ class Server:
     # ------------------------------------------------------------------ messages
     async def dispatch(self, c: Client, msg: dict) -> None:
         t = msg.get("t")
+        if t == "announce_restart" and c.id is None and str((c.addr or ("",))[0]) in ("127.0.0.1", "::1"):
+            await self.announce_restart(max(5, min(600, int(msg.get("in") or 60))))     # from this machine only
+            await c.send({"t": "ok"})
+            return
         if c.id is None:
             if t != "hello":
                 await c.send({"t": "error", "error": "say hello first"})
@@ -318,7 +335,7 @@ class Server:
             "t": "welcome", "id": c.id, "server_version": VERSION, "motd": self.motd,
             "leader": self.leader.id, "world": self.world, "host": self.host_id,
             "players": [o.public() for o in self.clients.values() if o is not c],
-            "houses": self.store.list_houses(), "modset": modset,
+            "houses": self.store.list_houses(), "modset": modset, "world_save": self.store.world_save(),
         })
         await self.broadcast({"t": "joined", "player": c.public()}, exclude=c)
         if before not in (None, self.leader.id):                    # the clock changed hands
@@ -441,9 +458,9 @@ class Server:
         if getattr(c, "mine", (None,))[0] != self.store.mods_changed:
             c.mine = (self.store.mods_changed, {f["h"]: f["s"] for m in self.store.all_mods().get(c.id, {}).get("mods", [])
                                                 for f in m["files"]})
-        mine = c.mine[1]
+        mine = {**c.mine[1], **self.world_offers.get(c.id, {})}
         if h not in mine:
-            await c.send({"t": "blob_bad", "h": h, "error": "not a file of your mods"})
+            await c.send({"t": "blob_bad", "h": h, "error": "not a file of your mods or your world upload"})
             return
         part = self.store.blob(h).with_name(f"{h}.{c.id}.part")
         size = part.stat().st_size if part.exists() else 0
@@ -469,7 +486,8 @@ class Server:
         """Download a piece of a file that's part of the shared mods: {h, o} -> blob {h, o, d, end}."""
         h, offset = str(msg.get("h", "")), int(msg.get("o") or 0)
         path = self.store.blob(h)
-        if not SHA.fullmatch(h) or h not in self.shared_blobs():
+        world = {f["h"] for f in (self.store.world_save() or {}).get("files", [])}
+        if not SHA.fullmatch(h) or (h not in self.shared_blobs() and h not in world):
             await c.send({"t": "blob", "h": h, "error": "not shared"})
             return
         if not path.exists():
@@ -480,6 +498,48 @@ class Server:
             data = f.read(CHUNK)
         await c.send({"t": "blob", "h": h, "o": offset, "d": base64.b64encode(data).decode(),
                       "end": offset + len(data) >= path.stat().st_size})
+
+    # ------------------------------------------------------------------ the shared world
+    async def on_world_save_offer(self, c: Client, msg: dict) -> None:
+        """About to upload the world: {files: [{p, h, s}]}. Answers which files the server still needs."""
+        files = clean_files(msg.get("files"), 2000)
+        if not any(f["p"].endswith(".usvx") for f in files):
+            await c.send({"t": "world_save_offer", "error": "no save file in the upload"})
+            return
+        self.world_offers[c.id] = {f["h"]: f["s"] for f in files}
+        need = sorted({f["h"] for f in files if not self.store.blob(f["h"]).exists()})
+        await c.send({"t": "world_save_offer", "need": need})
+
+    async def on_world_save_put(self, c: Client, msg: dict) -> None:
+        """The uploaded world becomes the new version, if it was based on the current one:
+        {files, base (the version the player had loaded), name}."""
+        files = clean_files(msg.get("files"), 2000)
+        current = self.store.world_save() or {}
+        version = current.get("version", 0)
+        if msg.get("base") != version:
+            await c.send({"t": "world_save_put", "ok": False, "version": version,
+                          "error": f"the world changed since you loaded it (it's at version {version} now)"})
+            return
+        missing = [f["p"] for f in files if not self.store.blob(f["h"]).exists()]
+        if missing or not files:
+            await c.send({"t": "world_save_put", "ok": False, "version": version,
+                          "error": f"files not uploaded yet: {', '.join(missing[:5])}"})
+            return
+        meta = {"version": version + 1, "by": c.name, "pid": c.id, "time": now(), "files": files,
+                "name": str(msg.get("name", ""))[:100] or current.get("name", ""), "size": sum(f["s"] for f in files)}
+        self.store.set_world_save(meta)
+        self.world_offers.pop(c.id, None)
+        log.info("%s saved the shared world: version %d (%d MB)", c.name, meta["version"], meta["size"] >> 20)
+        await c.send({"t": "world_save_put", "ok": True, "version": meta["version"]})
+        await self.broadcast({"t": "world_save", **meta}, exclude=c)
+
+    async def announce_restart(self, seconds: int) -> None:
+        """Before the server restarts: everyone saves their game (the world keeper also uploads it)."""
+        keeper = self.leader.id if self.leader else None
+        log.info("restart in %d s: asking everyone to save (world keeper %s)", seconds, keeper)
+        await self.broadcast({"t": "restart_soon", "in": seconds, "keeper": keeper})
+        await self.broadcast({"t": "chat", "id": None, "name": "Server", "time": now(),
+                              "text": f"The server restarts in {seconds} seconds: your game is saved first."})
 
     # ------------------------------------------------------------------ keepalive
     async def keepalive(self) -> None:
@@ -535,9 +595,20 @@ def main() -> None:
     ap.add_argument("--max-players", type=int, default=int(os.environ.get("INZOI_MP_MAX_PLAYERS", 16)))
     ap.add_argument("--motd", default=os.environ.get("INZOI_MP_MOTD", ""), help="message shown to players when they join")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--announce-restart", type=int, metavar="SECONDS",
+                    help="tell the server running on this machine to have everyone save, then exit (restart it after)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    if args.announce_restart:
+        async def announce():
+            r, w = await asyncio.open_connection("127.0.0.1", args.port)
+            w.write((json.dumps({"t": "announce_restart", "in": args.announce_restart}) + "\n").encode())
+            await w.drain()
+            print(json.loads(await asyncio.wait_for(r.readline(), 10)))
+            w.close()
+        asyncio.run(announce())
+        return
     try:
         asyncio.run(main_async(args))
     except KeyboardInterrupt:

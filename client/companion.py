@@ -35,6 +35,7 @@ import mods  # noqa: E402
 import saves  # noqa: E402
 import updater  # noqa: E402
 import webui  # noqa: E402
+import world  # noqa: E402
 from game import Game, GameError, describe_act  # noqa: E402
 from lua_data import Registry  # noqa: E402
 from mailbox import Mailbox  # noqa: E402
@@ -235,6 +236,13 @@ class Companion:
         self.update = None           # a newer version: {version, title, state, done, total, path}
         self.update_box = None       # the update question the panel shows: {key, text, buttons}
         self.restart_args = ["--play"]   # how the launcher started me (an update restarts the same way)
+        self.world_meta = None       # the server's shared world: {version, by, time, name, files, size}, or None
+        self.world_box = None        # a shared-world question for the panel: {key, text, buttons}
+        self.world_busy = False      # downloading / uploading / saving the world
+        self.world_job = None        # what the panel shows while busy: {what, done, total}
+        self.world_waiters = {}      # reply type -> future (world_save_offer / world_save_put)
+        self.world_hashes = mods.Hashes(CONFIG_DIR / "world_hashes.json")
+        self.world_asked = False     # offered to make my multiplayer save the shared world (once per run)
         install.MAILBOX_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ helpers
@@ -312,6 +320,18 @@ class Companion:
             self.houses = {h["owner"]: h for h in m.get("houses") or []}
             self.modset = m.get("modset")
             self.check_mods()
+            self.world_meta = m.get("world_save")
+            self.check_world()
+        elif t == "world_save":
+            self.world_meta = {k: v for k, v in m.items() if k != "t"}
+            self.system_line(f"{m.get('by') or 'Someone'} saved the shared world")
+            self.check_world()
+        elif t in ("world_save_offer", "world_save_put"):
+            fut = self.world_waiters.pop(t, None)
+            if fut and not fut.done():
+                fut.set_result(m)
+        elif t == "restart_soon":
+            asyncio.get_running_loop().create_task(self.on_restart_soon(m))
         elif t == "modset":
             self.modset = {k: v for k, v in m.items() if k != "t"}
             self.check_mods()
@@ -628,6 +648,8 @@ class Companion:
                 if tick % 5 == 0:
                     await self.watch_save(entered=False)
                 active = self.mp_active()
+                if tick % 25 == 7 and active and self.writer and not self.world_busy:
+                    asyncio.get_running_loop().create_task(self.maybe_upload_world())   # after the game saved
                 if time.time() - last_me > 1:
                     self.my_entity, last_me = await self.g(self.game.possessed), time.time()
                 st = await self.g(self.game.state_of, self.my_entity)
@@ -730,10 +752,13 @@ class Companion:
                     if s["mp"] is False:
                         self.show_paused()
         if s["mp"] is None and not self.save_box and not self.save_busy:
-            if not mp:
-                self.ask_setup()
-            else:
+            if mp:
                 self.ask_confirm()
+            elif not self.world_meta:                     # with a shared world, that becomes the multiplayer save
+                self.ask_setup()
+        if self.writer and not self.world_meta and not self.world_asked and (mp or {}).get("folder"):
+            self.world_asked = True
+            self.check_world()                            # no shared world on this server yet: offer ours
 
     def set_box(self, key: str, text: str, buttons: list, question: str | None = None, on_text=None):
         self.save_box = {"key": key, "text": text, "buttons": [{"id": b, "label": label} for b, label in buttons]}
@@ -872,8 +897,10 @@ class Companion:
     async def at_main_menu(self):
         """At the game's main menu: load the multiplayer save (once per run)."""
         mp = self.cfg.get("mp_save")
-        if not mp or not mp.get("folder") or self.auto_loaded or self.save_busy:
+        if not mp or not mp.get("folder") or self.auto_loaded or self.save_busy or self.world_busy:
             return
+        if self.world_meta and self.world_meta["version"] > self.local_world().get("version", 0):
+            return                                        # a newer shared world is on its way: load that one
         try:
             st = await self.g(self.game.call, "game.get_state")
         except GameError:
@@ -885,6 +912,184 @@ class Companion:
             await self.load_mp_save()
         except GameError as e:
             log.warning("couldn't load the multiplayer save: %s", e)
+
+    # ------------------------------------------------------------------ the shared world
+    # The server keeps one world save that every player plays (docs/shared-world.md). This PC's copy of it is the
+    # multiplayer save; cfg["world"] = {version, folder, mtime} says which version it is. Whoever is alone in the
+    # world uploads it after each game save; with others in it too, the last one left does. Before a server restart
+    # everyone saves, the keeper uploads, and everyone reloads after.
+    def local_world(self) -> dict:
+        return self.cfg.get("world") or {}
+
+    def check_world(self):
+        meta, mine = self.world_meta, self.local_world()
+        if self.world_busy or not self.writer:
+            return
+        if not meta:
+            if (self.cfg.get("mp_save") or {}).get("folder") and not self.world_box:
+                self.ask_make_world()
+            return
+        if meta["version"] <= mine.get("version", 0):
+            return
+        if self.world != "out" and self.mp_active():
+            self.world_box = {"key": f"reload{meta['version']}", "text":
+                              f"{meta.get('by') or 'Someone'} saved a newer version of the shared world. Load it now? "
+                              "(What you did since your last save stays only in your copy.)",
+                              "buttons": [{"id": "reload", "label": "Load it"}, {"id": "later", "label": "Later"}]}
+        else:
+            asyncio.get_running_loop().create_task(self.download_world(meta))
+
+    def ask_make_world(self):
+        key = "make"
+        text = (f"This server has no shared world yet. Make your multiplayer save ({self.mp_name()}) everyone's "
+                "world? Friends then play in it too, with you.")
+        self.world_box = {"key": key, "text": text,
+                          "buttons": [{"id": "make", "label": "Make it everyone's world"}, {"id": "later", "label": "Not now"}]}
+        self.console_ask(f"\n  ------------------------------------------------------------------------------\n  {text}\n"
+                         "  Type y (yes) or n (not now) and press Enter [y]: ",
+                         lambda a: self.world_action(key, "later" if a.startswith("n") else "make"))
+
+    def world_action(self, key: str, action: str):
+        box = self.world_box
+        if not box or box["key"] != key or self.world_busy:
+            return
+        self.world_box = None
+        loop = asyncio.get_running_loop()
+        if action == "make":
+            mp = self.cfg.get("mp_save") or {}
+            loop.create_task(self.upload_world(mp.get("folder"), base=0))
+        elif action == "reload":
+            loop.create_task(self.reload_world())
+
+    async def download_world(self, meta: dict):
+        """Fetch the server's world and make it this PC's multiplayer save (it loads at the game's main menu)."""
+        self.world_busy = True
+        stage = mods.DATA / "downloads"
+        files = {f["h"]: f["s"] for f in meta["files"]}
+        job = self.world_job = {"what": "Downloading the shared world", "done": 0, "total": sum(files.values())}
+        try:
+            todo = [h for h in files if not (stage / h).exists()]
+            job["done"] = job["total"] - sum(files[h] for h in todo)
+            bar = ProgressBar("Downloading the shared world", job["total"])
+            bar.done = job["done"]
+
+            def progress(n):
+                job["done"] += n
+                bar.add(n)
+            async with mods.Transfer(self.address(), self.cfg["key"], self.cfg["name"]) as tr:
+                for h in todo:
+                    why = await tr.download(h, stage / h, progress)
+                    if why:
+                        raise ConnectionError(f"the server is missing part of the world ({why})")
+            bar.finish()
+            folder = (self.local_world().get("folder") or (self.cfg.get("mp_save") or {}).get("folder"))
+            folder = await self.g(world.install, meta["files"], lambda h: stage / h, folder)
+            slot = world.newest_slot(folder)
+            self.cfg["world"] = {"version": meta["version"], "folder": folder, "mtime": slot.stat().st_mtime}
+            self.cfg["mp_save"] = {"folder": folder, "name": f"{meta.get('name') or 'the shared world'} (shared world)"}
+            save_config(self.cfg)
+            for h in files:
+                (stage / h).unlink(missing_ok=True)
+            self.auto_loaded = False                       # load it at the main menu
+            log.info("the shared world (version %d, saved by %s) is your multiplayer save now",
+                     meta["version"], meta.get("by"))
+        except (OSError, ConnectionError, ValueError, asyncio.TimeoutError) as e:
+            log.warning("downloading the shared world failed: %s", e)
+        finally:
+            self.world_busy, self.world_job = False, None
+
+    async def world_request(self, msg: dict, reply: str, timeout: float = 30) -> dict:
+        fut = self.world_waiters[reply] = asyncio.get_running_loop().create_future()
+        await self.send(msg)
+        return await asyncio.wait_for(fut, timeout)
+
+    async def upload_world(self, folder: str | None, base: int | None = None):
+        """Send this PC's copy of the world to the server as its next version."""
+        if not folder or self.world_busy or not self.writer:
+            return
+        self.world_busy = True
+        base = self.local_world().get("version", 0) if base is None else base
+        try:
+            files, paths, mtime = await self.g(world.pack, folder, self.world_hashes)
+            offer = await self.world_request({"t": "world_save_offer", "files": files}, "world_save_offer")
+            if offer.get("error"):
+                raise ValueError(offer["error"])
+            need = offer.get("need", [])
+            job = self.world_job = {"what": "Uploading the shared world", "done": 0,
+                                    "total": sum(paths[h].stat().st_size for h in need)}
+            if need:
+                bar = ProgressBar("Uploading the shared world", job["total"])
+
+                def progress(n):
+                    job["done"] += n
+                    bar.add(n)
+                async with mods.Transfer(self.address(), self.cfg["key"], self.cfg["name"]) as tr:
+                    for h in need:
+                        await tr.upload(paths[h], h, progress)
+                bar.finish()
+            put = await self.world_request({"t": "world_save_put", "files": files, "base": base,
+                                            "name": (self.cfg.get("mp_save") or {}).get("name", "").replace(
+                                                " (shared world)", "")}, "world_save_put")
+            if not put.get("ok"):
+                log.warning("the shared world wasn't saved to the server: %s", put.get("error"))
+                return
+            self.cfg["world"] = {"version": put["version"], "folder": folder, "mtime": mtime}
+            save_config(self.cfg)
+            log.info("saved the shared world to the server (version %d)", put["version"])
+        except (OSError, ConnectionError, ValueError, asyncio.TimeoutError) as e:
+            log.warning("uploading the shared world failed: %s", e)
+        finally:
+            self.world_busy, self.world_job = False, None
+
+    def world_status_box(self) -> dict | None:
+        job = self.world_job
+        if job:
+            pct = int(100 * job["done"] / max(1, job["total"]))
+            return {"key": "job", "buttons": [],
+                    "text": f"{job['what']}: {size_text(job['done'])} of {size_text(job['total'])} ({pct}%)"}
+        return self.world_box
+
+    def alone_in_world(self) -> bool:
+        return not any(r.state and time.time() - r.state_at < 30 for r in self.remotes.values())
+
+    async def maybe_upload_world(self):
+        """After the game saves the world (autosave or by hand), upload it if nobody else is in it."""
+        mine = self.local_world()
+        folder = mine.get("folder")
+        if not folder or not self.world_meta or self.world_busy or not self.alone_in_world():
+            return
+        if self.save_session.get("folder") not in (None, folder):
+            return
+        slot = world.newest_slot(folder)
+        if slot and slot.stat().st_mtime > mine.get("mtime", 0) + 1:
+            await self.upload_world(folder)
+
+    async def reload_world(self):
+        """Leave this game without saving and load the newer shared world (downloaded first)."""
+        self.despawn_all()
+        await asyncio.sleep(1.5)
+        await self.g(self.game.call, "game.goto_lobby", save=False)
+        await self.wait_game(lambda st: st.get("is_lobby"), 240)
+        if self.world_meta:
+            await self.download_world(self.world_meta)
+
+    async def on_restart_soon(self, m: dict):
+        """The server restarts in a moment: save the game (and, as the world keeper, upload the world); everything
+        reloads once the server is back."""
+        log.info("the server restarts in %s s: saving your game", m.get("in"))
+        if self.world == "out" or not self.mp_active() or self.save_busy:
+            return
+        self.save_busy = True
+        try:
+            await self.to_main_menu()
+            folder = self.local_world().get("folder")
+            if folder and (m.get("keeper") == self.me_id or self.alone_in_world()):
+                await self.upload_world(folder)
+            self.auto_loaded = False                       # load the world again once the server is back
+        except (GameError, OSError, TimeoutError) as e:
+            log.warning("saving before the restart failed: %s", e)
+        finally:
+            self.save_busy = False
 
     # ------------------------------------------------------------------ updates
     async def update_loop(self):
@@ -1198,7 +1403,9 @@ class Companion:
                     "save": {"name": self.mp_name() if self.cfg.get("mp_save") else None,
                              "active": self.mp_active(), "box": self.save_box},
                     "update": {**{k: (self.update or {}).get(k) for k in ("version", "state", "done", "total")},
-                               "box": self.update_box}}
+                               "box": self.update_box},
+                    "world": {"server": (self.world_meta or {}).get("version"), "local": self.local_world().get("version"),
+                              "by": (self.world_meta or {}).get("by"), "box": self.world_status_box()}}
 
         async def chat(body):
             text = str(body.get("text", "")).strip()[:500]
@@ -1286,9 +1493,13 @@ class Companion:
             self.update_action(str(body.get("key", "")), str(body.get("action", "")))
             return {"ok": True, "box": self.update_box}
 
+        async def world_answer(body):
+            self.world_action(str(body.get("key", "")), str(body.get("action", "")))
+            return {"ok": True, "box": self.world_box}
+
         return {"/status": status, "/chat": chat, "/join": join, "/settings": settings,
                 "/houses": house_list, "/share": share, "/add_house": add_house, "/mods": mods_answer,
-                "/save": save_answer, "/update": update_answer}
+                "/save": save_answer, "/update": update_answer, "/world": world_answer}
 
 
 def setup_logging(verbose: bool):

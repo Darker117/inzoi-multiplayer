@@ -47,9 +47,9 @@ world kept on the server**, so buildings, NPCs, businesses and everyone's progre
 - E2 PASSED: a household built from a player's profile (`RegisterHousehold`, the puppet code path) can be played:
   `character.possess character_id= household_id=` switches to it with a normal HUD, needs, and its own money
   (M 30,000, like a new family). It starts without a home.
-- E3 OPEN: moving that household into a lot mid-game. `game.list_move_in_sites` lists free lots for it, but
-  `game.move_in` only works at a new game's first house pick. Next: the game's own map "move in" flow (by hand, or
-  driven with ui.*).
+- E3 PASSED: the new household moves into a lot through the game's own map (picked a free lot, moved in). The
+  `game.move_in` command only works at a new game's first house pick, so the first time a player joins the shared
+  world, their household arrives without a home and they pick one on the map, like a new family.
 - E4 PASSED: the controller's new `adopt` op drives an existing Zoi (Bella) like a puppet (it walked the given
   trail); `despawn` releases an adopted Zoi (free will back) instead of destroying it.
 - E5 PASSED: the controller's `freeze` (FB2AutonomyOptionManager individual toggles) works on any Zoi; the CLI
