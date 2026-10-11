@@ -96,6 +96,12 @@ class Game:
             pass
         return "play"
 
+    def saves(self, limit: int = 10, autosave: bool = True, refresh: bool = False) -> list[dict]:
+        """Save slots, newest first: {folder, file, slot, first_name, last_name, map, saved_time, is_broken, ...}."""
+        r = self.call("game.list_saves", limit=limit, include_autosave=autosave, refresh=refresh)
+        _, _, body = str(r.get("_text", "") if isinstance(r, dict) else r).partition("\n")
+        return json.loads(body) if body.strip().startswith("[") else []
+
     def possessed(self) -> int:
         return int(self.call("entity.get_possessed")["entity_id"])
 

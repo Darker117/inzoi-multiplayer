@@ -37,8 +37,10 @@ Your host gives you **the server address** (it looks like `100.101.102.103`) and
 2. Double-click **inZOI-Multiplayer.exe**. Type **1** and press Enter.
 3. The first time, it asks for **your name** (what friends see) and the **server address** your host gave you.
    It remembers both: next time, just press Enter. To change them, type **4** (Settings) instead.
-4. Start inZOI and load your save. The **inZOI Multiplayer** panel appears on the left of the screen.
-   Keep the program's window open while you play.
+4. Start inZOI. **The first time**, load the save you want to play with friends: the program offers to make a
+   multiplayer copy of it ([see below](#your-multiplayer-save)). **After that**, just wait at the main menu: the
+   program loads your multiplayer save for you. The **inZOI Multiplayer** panel appears on the left of the
+   screen. Keep the program's window open while you play.
 
 If your host uses a password: open the program, type **4** (Settings) and enter it at *Password of that server*
 (or in the game: the panel's **Settings**, **Password**, **Save**).
@@ -52,7 +54,8 @@ If your host uses a password: open the program, type **4** (Settings) and enter 
 3. The window shows the address and password to give your friends:
    - `100.x.x.x` for friends anywhere, through Tailscale ([see below](#playing-over-the-internet-tailscale))
    - `192.168.x.x` for friends in your home
-4. Start inZOI and load your save. Keep the window open while you and your friends play.
+4. Start inZOI the same way as when joining (step 4 above). Keep the window open while you and your friends
+   play.
 
 ### Host only
 
@@ -101,6 +104,20 @@ put it there. The owner saves their home to My Library (Build mode) and shares i
 click **Add to library** and place it, in Build mode, on the lot the panel names. Then the owner's Zoi walks
 through the same rooms on everyone's screen.
 
+## Your multiplayer save
+
+Multiplayer plays in a save of its own, so your normal saves stay untouched by it (friends' Zois coming and
+going, the shared clock, friends' houses).
+
+- **The first time** you play multiplayer, the program asks, in its window and in the panel:
+  **make a multiplayer copy** of the save you're in (recommended: the game saves, goes to the main menu for a
+  moment and loads the copy; your original stays as it was), **use this save** as it is, or **not now**.
+- **Coming back:** open the program, start inZOI and wait at the main menu. It loads your multiplayer save.
+- **In any other save, multiplayer pauses:** friends' Zois leave it and the shared clock leaves it alone. If you
+  load a save yourself, the program asks whether it's your multiplayer save. The panel's *Switch to my
+  multiplayer save* saves that game and takes you back.
+- The panel's **Settings** tab shows which save is your multiplayer save, and the version.
+
 ## Mods
 
 Everyone needs the same mods to see each other's clothes, hair and things, and the program takes care of it:
@@ -109,7 +126,8 @@ Everyone needs the same mods to see each other's clothes, hair and things, and t
   window and in the panel's **Mods** tab.
 - **Stand-alone server (Host only, or a Raspberry Pi):** everyone's mods are shared, and each player is offered the
   ones the others have. If two players have different versions of a mod, the newer one wins.
-- Downloaded mods load the next time you start inZOI. Only enabled mods are shared, and a mod replaced by a newer
+- A progress bar shows the download (and the upload, for whoever shares), in the program's window and in the
+  **Mods** tab. Downloaded mods load the next time you start inZOI. Only enabled mods are shared, and a mod replaced by a newer
   version is moved to `%APPDATA%\inzoi-mp\replaced-mods`, never deleted.
 
 ## Time

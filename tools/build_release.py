@@ -7,6 +7,7 @@ The first run creates build/venv with PyInstaller in it (needs the internet once
     inZOI-Multiplayer.exe               the program on its own
     inZOI-Multiplayer-<version>.zip     inZOI Multiplayer.exe, README.txt, server for Raspberry Pi or Linux/
 """
+import json
 import os
 import re
 import shutil
@@ -45,17 +46,27 @@ def _person(x, y, hx, hy, head, body, grow=0.0) -> bool:
     return ((x - bx) / (body + 8 + grow)) ** 2 + ((y - by) / (body + grow)) ** 2 <= 1
 
 
+def _letter_i(x, y, cx, top, w, h, grow=0.0) -> bool:
+    """A lowercase "i" (round dot over a rounded stem) - also a person: head and body."""
+    r = w / 2 + grow
+    if (x - cx) ** 2 + (y - (top + w / 2)) ** 2 <= (w * 0.58 + grow) ** 2:      # the dot
+        return True
+    y0, y1 = top + w * 1.55 + w / 2, top + h - w / 2                           # the stem: a capsule
+    py = min(max(y, y0), y1)
+    return (x - cx) ** 2 + (y - py) ** 2 <= r * r
+
+
 def _shade(x, y):
-    """Colour at a point of the 256x256 icon (None = transparent): two friends side by side."""
+    """Colour at a point of the 256x256 icon (None = transparent): two lowercase i's side by side, two players."""
     r = 56                                                      # rounded square, 8 px margin
     cx, cy = min(max(x, 8 + r), 248 - r), min(max(y, 8 + r), 248 - r)
     if (x - cx) ** 2 + (y - cy) ** 2 > r * r:
         return None
-    if _person(x, y, 160, 112, 34, 62):
+    if _letter_i(x, y, 152, 46, 48, 168):
         return MINT
-    if _person(x, y, 160, 112, 34, 62, grow=10):               # a gap between the two
+    if _letter_i(x, y, 152, 46, 48, 168, grow=11):             # a gap between the two
         return BG
-    if _person(x, y, 96, 84, 30, 54):
+    if _letter_i(x, y, 96, 70, 40, 140):
         return BLUE
     return BG
 
@@ -110,6 +121,24 @@ VERSION_INFO = """VSVersionInfo(
 """
 
 
+def sync_versions(version: str):
+    """One version number everywhere: the program's (client/companion.py VERSION) goes into the game mod (its .uplugin,
+    which also becomes the mod_manifest Version the game records in saves), the panel's manifest and the server."""
+    nums = [int(x) for x in (version.split(".") + ["0", "0"])[:3]]
+    mod = ROOT / "mod" / "InZOIMultiplayer"
+    plugin = mod / "InZOIMultiplayer.uplugin"
+    data = json.loads(plugin.read_text("utf-8"))
+    data.update(VersionName=version, Version=nums[0] * 10000 + nums[1] * 100 + nums[2])
+    plugin.write_text(json.dumps(data, indent="\t") + "\n", "utf-8")
+    panel = mod / "ui" / "mp" / "uimod_manifest.json"
+    data = json.loads(panel.read_text("utf-8"))
+    data["version"] = version
+    panel.write_text(json.dumps(data, indent="\t") + "\n", "utf-8")
+    server = ROOT / "server" / "inzoi_mp_server.py"
+    text = server.read_text("utf-8")
+    server.write_text(re.sub(r'^VERSION = "[^"]*"', f'VERSION = "{version}"', text, count=1, flags=re.M), "utf-8")
+
+
 def build_exe(version: str) -> Path:
     stage = BUILD / "stage"
     if stage.exists():
@@ -134,6 +163,7 @@ def build_exe(version: str) -> Path:
 
 def main():
     version = re.search(r'VERSION = "([^"]+)"', (ROOT / "client" / "companion.py").read_text("utf-8")).group(1)
+    sync_versions(version)
     exe = build_exe(version)
     name = f"inZOI-Multiplayer-{version}"
     out = DIST / name

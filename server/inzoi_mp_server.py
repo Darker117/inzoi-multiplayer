@@ -30,7 +30,7 @@ import signal
 import time
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.5.0"
 PROTOCOL = 1
 MAX_LINE = 32 * 1024 * 1024        # house snapshots can be large
 PING_EVERY = 15                    # seconds between keepalives

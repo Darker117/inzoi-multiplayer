@@ -131,6 +131,9 @@
         renderChat(s);
         renderTitle(s);
         renderMods(s.mods);
+        renderSave(s.save);
+        $('s-version').textContent = 'inZOI Multiplayer ' + s.version +
+            (s.save && s.save.name ? ' - multiplayer save: ' + s.save.name : '');
         $('s-sync').className = 'toggle' + (s.sync_time ? ' on' : '');
         $('s-sync').style.display = s.host ? 'none' : '';
         if (!lastStatus) {
@@ -178,6 +181,27 @@
         $(id).addEventListener('keydown', function (e) { e.stopPropagation(); });
     });
 
+    // ------------------------------------------------------------------ the multiplayer save
+    var saveKey = null;
+    function renderSave(sv) {
+        var box = sv && sv.box, wrap = $('save-box'), buttons = $('save-buttons');
+        wrap.style.display = box ? 'block' : 'none';
+        if (!box) { saveKey = null; return; }
+        $('save-text').textContent = box.text;
+        if (saveKey === box.key + box.text) { return; }       // keep the buttons while they're being clicked
+        saveKey = box.key + box.text;
+        clear(buttons);
+        box.buttons.forEach(function (b) {
+            var btn = el('span', 'btn', b.label);
+            btn.addEventListener('click', function () {
+                post('/save', { key: box.key, action: b.id }, function (r) {
+                    if (!r) { showNotice(NOT_RUNNING); } else { saveKey = null; poll(); }
+                });
+            });
+            buttons.appendChild(btn);
+        });
+    }
+
     // ------------------------------------------------------------------ mods
     var modsKey = null;
     function sizeText(n) {
@@ -211,15 +235,19 @@
         } else {
             text = o.message;
         }
-        if (m.sharing) {
-            text += ' Sharing your mods with friends: ' + Math.floor(100 * m.sharing.done / Math.max(1, m.sharing.total)) + '%';
+        var frac = o && o.total ? o.done / o.total : 0;
+        if (m.sharing && !bar) {
+            frac = m.sharing.done / Math.max(1, m.sharing.total);
+            text += ' Sharing your mods with friends: ' + sizeText(m.sharing.done) + ' of ' + sizeText(m.sharing.total);
+            bar = true;
         }
+        if (bar) { text += ' (' + Math.floor(100 * frac) + '%)'; }
         $('m-state').textContent = text;
         $('m-buttons').style.display = ask ? 'block' : 'none';
         $('m-yes').textContent = o && o.state === 'error' ? 'Try again' : 'Download';
         $('m-no').style.display = o && o.state === 'ask' ? '' : 'none';
         $('m-bar').style.display = bar ? 'block' : 'none';
-        $('m-fill').style.width = (o && o.total ? Math.floor(100 * o.done / o.total) : 0) + '%';
+        $('m-fill').style.width = Math.floor(100 * Math.min(1, frac)) + '%';
         var tab = $('tab-mods'), alert = o && o.state === 'ask';
         tab.textContent = alert ? 'Mods (' + o.names.length + ')' : 'Mods';
         tab.className = 'tab' + (tab.className.indexOf(' on') >= 0 ? ' on' : '') + (alert ? ' alert' : '');

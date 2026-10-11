@@ -16,6 +16,7 @@ Settings are remembered in %APPDATA%/inzoi-mp/config.json (the secret player key
 import argparse
 import asyncio
 import collections
+import datetime
 import json
 import logging
 import os
@@ -31,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import houses  # noqa: E402
 import install  # noqa: E402
 import mods  # noqa: E402
+import saves  # noqa: E402
 import webui  # noqa: E402
 from game import Game, GameError, describe_act  # noqa: E402
 from lua_data import Registry  # noqa: E402
@@ -39,7 +41,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -70,6 +72,19 @@ def ask(prompt: str) -> str:
         return input(prompt)
     except EOFError:
         return ""
+
+
+def save_time(entry: dict) -> float:
+    """A game.list_saves entry's saved_time ("2026-10-11T05:47:05.616Z", UTC) as a timestamp."""
+    try:
+        return datetime.datetime.fromisoformat(entry["saved_time"].replace("Z", "+00:00")).timestamp()
+    except (KeyError, ValueError):
+        return 0.0
+
+
+def save_label(entry: dict, extra: str = "") -> str:
+    who = f"{entry.get('first_name', '')} {entry.get('last_name', '')}".strip()
+    return f"{entry.get('slot') or who}" + (f" ({who}, {extra})" if extra else f" ({who})")
 
 
 def size_text(n: int) -> str:
@@ -127,6 +142,35 @@ def save_config(cfg: dict):
     CONFIG_FILE.write_text(json.dumps(cfg, indent=1), "utf-8")
 
 
+class ProgressBar:
+    """A progress bar in the program's window, redrawn in place:  Downloading mods [######------]  45%  12 of 27 MB.
+    (Without a window, the log gets a line at every quarter.)"""
+
+    def __init__(self, title: str, total: int):
+        self.title, self.total, self.done, self.shown = title, max(1, total), 0, -1.0
+        self.live = interactive()
+
+    def add(self, n: int):
+        self.done += n
+        self.draw()
+
+    def draw(self, final: bool = False):
+        frac = min(1.0, self.done / self.total)
+        step = 0.01 if self.live else 0.25
+        if not final and frac - self.shown < step:
+            return
+        self.shown = frac
+        bar = "#" * int(frac * 30) + "-" * (30 - int(frac * 30))
+        line = f"  {self.title} [{bar}] {int(frac * 100):3d}%  {size_text(self.done)} of {size_text(self.total)}"
+        if self.live:
+            print("\r" + line, end="\n" if final else "", flush=True)
+        else:
+            log.info(line.strip())
+
+    def finish(self):
+        self.draw(final=True)
+
+
 class Remote:
     """Another player, as seen from here."""
 
@@ -180,7 +224,13 @@ class Companion:
         self.modset = None           # the server's {source, host, mods}: the mods everyone should have
         self.mod_offer = None        # mods this PC is missing: {key, mods, size, from, state, done, total, message}
         self.mod_share = None        # uploading my mods' files: {done, total}
-        self.asking = False          # a "download these mods?" question is waiting in the console
+        self.asking = False          # a question is waiting in the console (console_ask)
+        self.console_queue = []      # questions after it: (text, on_answer)
+        self.save_session = {"started": 0.0, "folder": None, "mp": None}  # the save being played (see watch_save)
+        self.loading_save = None     # the save folder I asked the game to load
+        self.auto_loaded = False     # the multiplayer save was loaded for this run already
+        self.save_box = None         # the save question/notice the panel shows: {key, text, buttons}
+        self.save_busy = False       # making the multiplayer copy / switching saves
         install.MAILBOX_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ helpers
@@ -562,12 +612,17 @@ class Companion:
                         log.info("left the world (menu / loading)")
                         self.mod["state"] = "waiting for the game"
                     was_in_world = False
+                    await self.at_main_menu()
                     await asyncio.sleep(2)
                     continue
                 if not was_in_world:
                     was_in_world = True
                     await self.ensure_mod()
+                    await self.watch_save(entered=True)
                 tick += 1
+                if tick % 5 == 0:
+                    await self.watch_save(entered=False)
+                active = self.mp_active()
                 if time.time() - last_me > 1:
                     self.my_entity, last_me = await self.g(self.game.possessed), time.time()
                 st = await self.g(self.game.state_of, self.my_entity)
@@ -585,12 +640,16 @@ class Companion:
                     c = await self.g(self.game.call, "environment.get_time")
                     self.my_clock = (c["hour"], c["minute"], c.get("time_scale", 1), bool(c.get("paused")))
                     self.sleeping = bool(SLEEPING.search(f"{(act or {}).get('bag', '')} {anim or ''}"))
-                    if world == "play" and self.writer and self.me_id:
+                    if world == "play" and self.writer and self.me_id and active:
                         await self.keep_speed()
                 if tick % 25 == 0 and time.time() - self.mod["beat"] > 10:
                     log.info("the mod went quiet: loading it again")
                     await self.ensure_mod()
-                if self.writer and self.me_id:
+                if not active and any(r.spawned for r in self.remotes.values()):
+                    self.despawn_all()                     # not the multiplayer save: friends' Zois leave it
+                    for r in self.remotes.values():
+                        r.spawned = False
+                if self.writer and self.me_id and active:
                     if self.sent_profile is None or time.time() - last_profile_check > 30:
                         last_profile_check = time.time()
                         profile = await self.g(read_profile, self.game.call, self.my_entity)
@@ -632,6 +691,196 @@ class Companion:
                 log.warning("mailbox: %s", e)
             await asyncio.sleep(0.1)
 
+    # ------------------------------------------------------------------ the multiplayer save
+    # Multiplayer plays in a save of its own (cfg["mp_save"]), so a player's normal saves stay untouched. At the main
+    # menu the program loads it; in any other save, multiplayer pauses (no friends' Zois, no shared clock). A save the
+    # game loaded without me is identified by the next save it writes (game.list_saves), or by asking the player.
+    def mp_active(self) -> bool:
+        return self.save_session["mp"] is True
+
+    def mp_name(self) -> str:
+        return (self.cfg.get("mp_save") or {}).get("name") or "your multiplayer save"
+
+    async def watch_save(self, entered: bool):
+        """Called about once a second while in a world; entered = a world has just been loaded."""
+        mp = self.cfg.get("mp_save")
+        if entered:
+            folder, self.loading_save = self.loading_save, None
+            self.save_session = {"started": time.time(), "folder": folder, "checked": 0.0,
+                            "mp": (folder == mp["folder"]) if folder and mp and mp.get("folder") else None}
+            self.save_box = None
+            if self.save_session["mp"] is False:
+                self.show_paused()
+        s = self.save_session
+        if s["folder"] is None and time.time() - s.get("checked", 0) > 60:
+            s["checked"] = time.time()
+            newest = (await self.g(self.game.saves, 1) or [None])[0]
+            if newest and save_time(newest) > s["started"]:        # written by this session, after it loaded
+                s["folder"] = newest["folder"]
+                if mp and s["mp"] is True and mp.get("folder") != s["folder"]:
+                    mp["folder"] = s["folder"]             # they said this is the one (e.g. a Save As in the game)
+                    save_config(self.cfg)
+                elif mp and s["mp"] is None:
+                    s["mp"] = mp.get("folder") == s["folder"]
+                    if s["mp"] is False:
+                        self.show_paused()
+        if s["mp"] is None and not self.save_box and not self.save_busy:
+            if not mp:
+                self.ask_setup()
+            else:
+                self.ask_confirm()
+
+    def set_box(self, key: str, text: str, buttons: list, question: str | None = None, on_text=None):
+        self.save_box = {"key": key, "text": text, "buttons": [{"id": b, "label": label} for b, label in buttons]}
+        if question:
+            self.console_ask(question, lambda a: self.save_box and self.save_box["key"] == key and on_text(a))
+
+    def ask_setup(self):
+        self.set_box(
+            "setup", "Multiplayer plays in a save of its own, so your normal saves stay untouched. Make a multiplayer "
+            "copy of this save? The game saves, goes to the main menu for a moment and loads the copy.",
+            [("copy", "Make a multiplayer copy"), ("use", "Use this save"), ("later", "Not now")],
+            "\n  ------------------------------------------------------------------------------\n"
+            "  Multiplayer plays in a save of its own, so your normal saves stay untouched.\n"
+            "    c = make a multiplayer copy of this save (recommended: the game saves, goes to the\n"
+            "        main menu for a moment and loads the copy)\n"
+            "    u = use this save for multiplayer\n"
+            "    n = not now (multiplayer stays off in this save)\n"
+            "  Type c, u or n and press Enter [c]: ",
+            lambda a: self.save_action("setup", {"u": "use", "n": "later"}.get(a[:1], "copy")))
+
+    def ask_confirm(self):
+        self.set_box(
+            "confirm", f"Is this your multiplayer save ({self.mp_name()})? Multiplayer waits until you say.",
+            [("yes", "Yes"), ("no", "No")],
+            f"\n  Is this your multiplayer save ({self.mp_name()})? Type y (yes) or n (no) and press Enter [y]: ",
+            lambda a: self.save_action("confirm", "no" if a.startswith("n") else "yes"))
+
+    def show_paused(self):
+        log.info("this isn't your multiplayer save: multiplayer is paused here")
+        self.set_box("paused", f"This isn't {self.mp_name()}: multiplayer is paused here, so this save stays "
+                     "untouched.", [("switch", "Switch to my multiplayer save")])
+
+    def save_action(self, key: str, action: str):
+        """An answer from the panel or the console."""
+        if not self.save_box or self.save_box["key"] != key or self.save_busy:
+            return
+        if self.asking and key != "paused":
+            print("\n  (Answered in the game.)\n", flush=True)
+        self.save_box = None
+        s = self.save_session
+        if action == "copy":
+            asyncio.get_running_loop().create_task(self.make_mp_save())
+        elif action == "use":
+            self.cfg["mp_save"] = {"folder": s["folder"], "name": "the save you were playing"}
+            save_config(self.cfg)
+            s["mp"] = True
+            log.info("this save is your multiplayer save now")
+            asyncio.get_running_loop().create_task(self.name_mp_save())
+        elif action == "yes":
+            s["mp"] = True
+            if s["folder"] and self.cfg["mp_save"].get("folder") != s["folder"]:
+                self.cfg["mp_save"]["folder"] = s["folder"]
+                save_config(self.cfg)
+        elif action in ("no", "later"):
+            s["mp"] = False
+            if action == "no":
+                self.show_paused()
+        elif action == "switch":
+            asyncio.get_running_loop().create_task(self.switch_to_mp_save())
+
+    async def name_mp_save(self):
+        """Give the chosen save a name for the panel, once the game has written it (its newest entry)."""
+        for _ in range(30):
+            folder = self.save_session["folder"]
+            if folder:
+                entry = next((e for e in await self.g(self.game.saves, 20) if e["folder"] == folder), None)
+                if entry:
+                    self.cfg["mp_save"]["name"] = save_label(entry)
+                    save_config(self.cfg)
+                return
+            await asyncio.sleep(60)
+
+    async def to_main_menu(self):
+        """Save the game and go to the main menu (friends' Zois leave first, so they aren't saved in it)."""
+        self.despawn_all()
+        for r in self.remotes.values():
+            r.spawned = False
+        await asyncio.sleep(2)
+        await self.g(self.game.call, "game.goto_lobby", save=True)
+        await self.wait_game(lambda st: st.get("is_lobby"), 240)
+
+    async def wait_game(self, ok, timeout: float) -> dict:
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                st = await self.g(self.game.call, "game.get_state")
+                if ok(st):
+                    return st
+            except GameError:
+                pass
+            await asyncio.sleep(1)
+        raise TimeoutError("the game took too long")
+
+    async def make_mp_save(self):
+        self.save_busy = True
+        self.set_box("working", "Saving your game and making your multiplayer copy...", [])
+        try:
+            await self.to_main_menu()
+            newest = (await self.g(self.game.saves, 1) or [None])[0]
+            if not newest:
+                raise ValueError("the game didn't list the save it just made")
+            new = await self.g(saves.copy_save, newest["folder"], newest["file"])
+            entry = next((e for e in await self.g(self.game.saves, 20, True, True) if e["folder"] == new), None)
+            if not entry or entry.get("is_broken"):
+                raise ValueError("the game doesn't accept the copy")
+            self.cfg["mp_save"] = {"folder": new, "name": save_label(entry, "multiplayer copy"),
+                                   "copied_from": newest["folder"]}
+            save_config(self.cfg)
+            log.info("made your multiplayer save (a copy of %s): loading it", newest["folder"])
+            await self.load_mp_save()
+            self.save_box = None
+        except (GameError, OSError, ValueError, TimeoutError) as e:
+            log.warning("making the multiplayer save failed: %s", e)
+            self.set_box("error", f"Making the multiplayer copy failed: {e}. Load your save from the main menu to "
+                         "carry on.", [])
+        finally:
+            self.save_busy = False
+
+    async def switch_to_mp_save(self):
+        self.save_busy = True
+        self.set_box("working", f"Saving this game and loading {self.mp_name()}...", [])
+        try:
+            await self.to_main_menu()
+            await self.load_mp_save()
+            self.save_box = None
+        except (GameError, OSError, TimeoutError) as e:
+            self.set_box("error", f"Switching saves failed: {e}", [])
+        finally:
+            self.save_busy = False
+
+    async def load_mp_save(self):
+        mp = self.cfg["mp_save"]
+        self.loading_save, self.auto_loaded = mp["folder"], True
+        await self.g(self.game.call, "game.load", folder=mp["folder"])
+
+    async def at_main_menu(self):
+        """At the game's main menu: load the multiplayer save (once per run)."""
+        mp = self.cfg.get("mp_save")
+        if not mp or not mp.get("folder") or self.auto_loaded or self.save_busy:
+            return
+        try:
+            st = await self.g(self.game.call, "game.get_state")
+        except GameError:
+            return
+        if not st.get("is_lobby") or st.get("loading"):
+            return
+        log.info("loading %s", self.mp_name())
+        try:
+            await self.load_mp_save()
+        except GameError as e:
+            log.warning("couldn't load the multiplayer save: %s", e)
+
     # ------------------------------------------------------------------ mods
     async def mods_loop(self):
         """Tell the server which mods this PC has (again whenever they change), share their files when friends get
@@ -671,11 +920,14 @@ class Companion:
                 return
             share = self.mod_share = {"done": 0, "total": sum(files[h][1] for h in need)}
             log.info("sharing your mods with friends: %s to upload", size_text(share["total"]))
+            bar = ProgressBar("Sharing your mods", share["total"])
 
             def progress(n):
                 share["done"] += n
+                bar.add(n)
             for h in need:
                 await tr.upload(files[h][0], h, progress)
+            bar.finish()
             log.info("your mods are shared")
             self.mod_share = None
 
@@ -706,30 +958,45 @@ class Companion:
         names = ", ".join(o["from"]) or "someone"
         return f"The host ({names}) uses" if o["source"] == "host" else f"Your friends ({names}) use"
 
-    def ask_console(self, o: dict):
-        """Ask in the program's window too (the in-game panel asks as well; whichever answers first counts)."""
-        if self.asking or not interactive():
+    def console_ask(self, question: str, on_answer):
+        """Ask in the program's window, one question at a time (the in-game panel asks too; whichever answers first
+        counts, and a late answer to a question that's no longer open is ignored)."""
+        if not interactive():
             return
+        self.console_queue.append((question, on_answer))
+        if not self.asking:
+            self.next_question()
+
+    def next_question(self):
+        if not self.console_queue:
+            self.asking = False
+            return
+        question, on_answer = self.console_queue.pop(0)
         self.asking = True
         loop = asyncio.get_running_loop()
-        names = ", ".join(m["name"] for m in o["mods"][:12]) + (" ..." if len(o["mods"]) > 12 else "")
-        question = (f"\n  ------------------------------------------------------------------------------\n"
-                    f"  {self.mods_who(o)} {len(o['mods'])} mod(s) you don't have ({size_text(o['size'])}):\n"
-                    f"    {names}\n"
-                    f"  Without them, some of their clothes or things won't show up for you.\n"
-                    f"  Download them now? Type y (yes) or n (no) and press Enter [y]: ")
 
-        def ask():
-            try:
-                yes = not input(question).strip().lower().startswith("n")
-            except (EOFError, OSError, RuntimeError):
-                return
-            loop.call_soon_threadsafe(self.answer_mods, o["key"], yes, True)
-        threading.Thread(target=ask, daemon=True).start()
+        def run():
+            text = ask(question).strip().lower()
+            loop.call_soon_threadsafe(self.console_answered, on_answer, text)
+        threading.Thread(target=run, daemon=True).start()
+
+    def console_answered(self, on_answer, text: str):
+        try:
+            on_answer(text)
+        finally:
+            self.next_question()
+
+    def ask_console(self, o: dict):
+        names = ", ".join(m["name"] for m in o["mods"][:12]) + (" ..." if len(o["mods"]) > 12 else "")
+        self.console_ask(
+            f"\n  ------------------------------------------------------------------------------\n"
+            f"  {self.mods_who(o)} {len(o['mods'])} mod(s) you don't have ({size_text(o['size'])}):\n"
+            f"    {names}\n"
+            f"  Without them, some of their clothes or things won't show up for you.\n"
+            f"  Download them now? Type y (yes) or n (no) and press Enter [y]: ",
+            lambda text: self.answer_mods(o["key"], not text.startswith("n"), True))
 
     def answer_mods(self, key: str, yes: bool, console: bool = False):
-        if console:
-            self.asking = False
         o = self.mod_offer
         if not o or o["key"] != key or o["state"] not in ("ask", "declined", "error"):
             if console and o and o["state"] == "ask":
@@ -758,13 +1025,17 @@ class Companion:
                 o["total"] = sum(files.values())
                 log.info("downloading %d mod(s): %s", len(o["mods"]), size_text(o["total"] - o["done"]))
                 waiting = False
+                bar = ProgressBar("Downloading mods", o["total"])
+                bar.done = o["done"]
 
                 def progress(n):
                     o["done"] += n
+                    bar.add(n)
                 async with mods.Transfer(self.address(), self.cfg["key"], self.cfg["name"]) as tr:
                     for h in todo:
                         if await tr.download(h, stage / h, progress):
                             waiting = True                    # not uploaded yet: its owner is still sharing it
+                bar.finish()
                 if not waiting:
                     break
                 o["state"], o["message"] = "waiting", f"waiting for {', '.join(o['from'])} to finish sharing them"
@@ -838,7 +1109,9 @@ class Companion:
                     "name": self.cfg["name"], "mod": self.mod["state"], "notice": self.notice,
                     "paused": self.world in ("paused", "stopped"), "port": self.address()[1],
                     "host": self.leader == self.me_id, "sync_time": bool(self.cfg.get("sync_time", True)),
-                    "players": players, "chat": list(self.chat)[-30:], "mods": self.mods_status()}
+                    "players": players, "chat": list(self.chat)[-30:], "mods": self.mods_status(),
+                    "save": {"name": self.mp_name() if self.cfg.get("mp_save") else None,
+                             "active": self.mp_active(), "box": self.save_box}}
 
         async def chat(body):
             text = str(body.get("text", "")).strip()[:500]
@@ -918,8 +1191,13 @@ class Companion:
             self.answer_mods(str(body.get("key", "")), body.get("answer") == "yes")
             return self.mods_status()
 
+        async def save_answer(body):
+            self.save_action(str(body.get("key", "")), str(body.get("action", "")))
+            return {"ok": True, "box": self.save_box}
+
         return {"/status": status, "/chat": chat, "/join": join, "/settings": settings,
-                "/houses": house_list, "/share": share, "/add_house": add_house, "/mods": mods_answer}
+                "/houses": house_list, "/share": share, "/add_house": add_house, "/mods": mods_answer,
+                "/save": save_answer}
 
 
 def setup_logging(verbose: bool):
