@@ -149,8 +149,10 @@ def build_exe(version: str) -> Path:
         shutil.rmtree(stage)
     shutil.copytree(ROOT / "mod" / "InZOIMultiplayer", stage / "mod" / "InZOIMultiplayer",
                     ignore=lambda d, names: [n for n in names if n in SKIP_MOD])
-    icon, vfile = BUILD / "icon.ico", BUILD / "version_info.txt"
-    make_icon(icon)
+    icon, vfile = ROOT / "release" / "icon.ico", BUILD / "version_info.txt"
+    if not icon.exists():                                   # the chosen icon; without it, draw the built-in one
+        icon = BUILD / "icon.ico"
+        make_icon(icon)
     nums = ", ".join((version.split(".") + ["0", "0"])[:3])
     vfile.write_text(VERSION_INFO.replace("@T@", nums).replace("@V@", version), "utf-8")
     subprocess.run([

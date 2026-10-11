@@ -158,12 +158,13 @@ local function cancel_walk(c)
     IC.TryCancelInteraction(ic, IC.GetCurrentInteractionQueueId(ic), IC_CANCEL_CLEAR(), "mp_redirect")
 end
 
-local function freeze(id)
+local function freeze(id, on)
     local am = inzoi.getB2Manager("FB2AutonomyOptionManager")
     local T = inzoi.EB1AutonomyOptionType
-    am:SetIndividualToggleOption(eid(id), T.AutonomyEnable, false)      -- no free will
-    am:SetIndividualToggleOption(eid(id), T.FollowSchedule, false)      -- no wandering off to work/school
-    am:SetIndividualToggleOption(eid(id), T.FreezeStat, true)           -- needs don't decay: never hungry or tired
+    local frozen = on ~= false
+    am:SetIndividualToggleOption(eid(id), T.AutonomyEnable, not frozen) -- no free will
+    am:SetIndividualToggleOption(eid(id), T.FollowSchedule, not frozen) -- no wandering off to work/school
+    am:SetIndividualToggleOption(eid(id), T.FreezeStat, frozen)         -- needs don't decay: never hungry or tired
 end
 
 local function teleport(id, x, y, z)
@@ -265,13 +266,30 @@ local function spawn_puppet(op)
     return string.format("spawned %s as %d (household %d), build %s", op.key, id, hh.Value, built)
 end
 
+-- Shared world: a player's Zoi already lives in this world (their own household). Drive that one instead of building
+-- a copy: same character, same household, same home and relationships.
+local function adopt_puppet(op)
+    local id = tonumber(op.entity)
+    id = id and math.floor(id)
+    if not id or not char(id) then error("no character " .. tostring(op.entity)) end
+    freeze(id)
+    PUPPETS[op.key] = { id = id, trail = {}, dest = nil, lastOrderT = -10, pending = nil, hidden = false,
+                        adopted = true }
+    report("spawned", op.key .. " " .. id)
+    return string.format("adopted %s: %d", op.key, id)
+end
+
 local function despawn_puppet(op)
     local p = PUPPETS[op.key]
     if not p then return "no puppet " .. tostring(op.key) end
-    cli(string.format("zoi.destroy entity_id=%d", p.id))
+    if p.adopted then
+        freeze(p.id, false)                             -- their player left: the game looks after them again
+    else
+        cli(string.format("zoi.destroy entity_id=%d", p.id))
+    end
     PUPPETS[op.key] = nil
     report("despawned", op.key)
-    return "despawned " .. op.key
+    return (p.adopted and "released " or "despawned ") .. op.key
 end
 
 local function add_trail(op)
@@ -407,6 +425,7 @@ end
 -- ---------------------------------------------------------------- mailbox
 local OPS = {
     spawn = spawn_puppet,
+    adopt = adopt_puppet,
     despawn = despawn_puppet,
     trail = add_trail,
     hide = function(op)
