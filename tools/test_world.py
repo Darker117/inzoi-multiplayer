@@ -88,7 +88,8 @@ async def main():
 
         def spawn(role):
             env = {**os.environ, "APPDATA": str(tmp / f"{role}-appdata"), "INZOI_MP_DOCUMENTS": str(tmp / f"{role}-docs"),
-                   "INZOI_MP_GAME_URL": "http://127.0.0.1:9/mcp", "INZOI_MP_PANEL_PORT": "0"}
+                   "INZOI_MP_GAME_URL": "http://127.0.0.1:9/mcp", "INZOI_MP_PANEL_PORT": "0",
+                   "INZOI_MP_SHARED_WORLD": "1"}
             return asyncio.create_subprocess_exec(sys.executable, __file__, "--player", role, "--port", str(port),
                                                   "--out", str(tmp / f"{role}.json"), env=env)
         a = await spawn("Ana")

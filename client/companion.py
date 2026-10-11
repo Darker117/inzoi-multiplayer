@@ -43,7 +43,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -607,6 +607,8 @@ class Companion:
             if self.writer and self.me_id and time.time() - self.connected_at > 20:
                 for key in ids:
                     r = self.remotes.get(key)
+                    if ids[key] == self.my_entity:
+                        continue                 # never the Zoi being played (a household the program created)
                     if (r is None or not r.spawned) and time.time() - self.cleaning.get(key, 0) > 15:
                         log.info("removing a leftover puppet (%s)", key)
                         self.cleaning[key] = time.time()
@@ -921,9 +923,14 @@ class Companion:
     def local_world(self) -> dict:
         return self.cfg.get("world") or {}
 
+    def shared_world_on(self) -> bool:
+        """The shared world is switched on once each player gets a household of their own in it (stages 2-3);
+        until then only tests and cfg["shared_world"] turn it on."""
+        return bool(self.cfg.get("shared_world") or os.environ.get("INZOI_MP_SHARED_WORLD"))
+
     def check_world(self):
         meta, mine = self.world_meta, self.local_world()
-        if self.world_busy or not self.writer:
+        if self.world_busy or not self.writer or not self.shared_world_on():
             return
         if not meta:
             if (self.cfg.get("mp_save") or {}).get("folder") and not self.world_box:
@@ -1056,7 +1063,8 @@ class Companion:
         """After the game saves the world (autosave or by hand), upload it if nobody else is in it."""
         mine = self.local_world()
         folder = mine.get("folder")
-        if not folder or not self.world_meta or self.world_busy or not self.alone_in_world():
+        if not folder or not self.world_meta or self.world_busy or not self.alone_in_world() \
+                or not self.shared_world_on():
             return
         if self.save_session.get("folder") not in (None, folder):
             return
@@ -1083,7 +1091,7 @@ class Companion:
         try:
             await self.to_main_menu()
             folder = self.local_world().get("folder")
-            if folder and (m.get("keeper") == self.me_id or self.alone_in_world()):
+            if folder and self.shared_world_on() and (m.get("keeper") == self.me_id or self.alone_in_world()):
                 await self.upload_world(folder)
             self.auto_loaded = False                       # load the world again once the server is back
         except (GameError, OSError, TimeoutError) as e:

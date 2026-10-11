@@ -413,7 +413,7 @@ local function rediscover()
             local name = tostring(hh:GetHouseholdName())
             local key = name:match("^MP (p%x+)$")
             local members = hh:GetHouseholdMembers()
-            if key and members:Num() > 0 and not PUPPETS[key] then
+            if key and members:Num() > 0 and not PUPPETS[key] and members:Get(1).Value ~= S.me then   -- not the one being played
                 PUPPETS[key] = { id = members:Get(1).Value, trail = {}, lastOrderT = -10, hidden = false }
                 found = found + 1
             end
