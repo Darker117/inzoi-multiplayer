@@ -11,8 +11,9 @@ family, age, get hungry or wander off. They only do what the real player does.
 
 ## Download
 
-Get **inZOI-Multiplayer.exe** from the [latest release](https://github.com/Darker117/inzoi-multiplayer/releases/latest).
-That one file is all you need: the game mod is inside it.
+**[Download inZOI-Multiplayer.exe](https://github.com/Darker117/inzoi-multiplayer/releases/latest/download/inZOI-Multiplayer.exe)**
+(or see the [latest release](https://github.com/Darker117/inzoi-multiplayer/releases/latest)). That one file is all
+you need: the game mod is inside it.
 
 The first time you open it, Windows may say "Windows protected your PC", because the program is new and not
 code-signed. Click **More info**, then **Run anyway**.
