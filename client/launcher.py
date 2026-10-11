@@ -41,7 +41,7 @@ TAILNET = ipaddress.ip_network("100.64.0.0/10")
 
 
 def interactive() -> bool:
-    return bool(sys.stdin and sys.stdin.isatty())
+    return companion.interactive()
 
 
 def server_text(cfg: dict) -> str:
@@ -60,7 +60,7 @@ def choose_mode(cfg: dict) -> str:
         print(f"    {i}  {title:<16}{what}")
     print(f"    4  {'Settings':<16}change your name, the server address or the passwords")
     while True:
-        pick = input(f"\n  Type 1, 2, 3 or 4 and press Enter [{default}]: ").strip() or str(default)
+        pick = companion.ask(f"\n  Type 1, 2, 3 or 4 and press Enter [{default}]: ").strip() or str(default)
         if pick in ("1", "2", "3", "4"):
             print()
             return modes[int(pick) - 1]
@@ -69,22 +69,22 @@ def choose_mode(cfg: dict) -> str:
 def edit_settings(cfg: dict):
     """Menu 4: change what was typed in before. Enter keeps the value shown in [brackets]."""
     print("  Settings. Press Enter to keep what's in [brackets]. Type none to remove a password.\n")
-    name = input(f"  Your name [{cfg.get('name') or ''}]: ").strip()
+    name = companion.ask(f"  Your name [{cfg.get('name') or ''}]: ").strip()
     if name:
         cfg["name"] = name
     print("\n  When you join a friend:")
-    addr = input(f"  Server address [{server_text(cfg) or 'none'}]: ").strip()
+    addr = companion.ask(f"  Server address [{server_text(cfg) or 'none'}]: ").strip()
     if addr:
         host, _, port = addr.partition(":")
         cfg["server"], cfg["port"] = host.strip(), int(port) if port.strip().isdigit() else 24242
-    pw = input(f"  Password of that server [{cfg.get('password') or 'none'}]: ").strip()
+    pw = companion.ask(f"  Password of that server [{cfg.get('password') or 'none'}]: ").strip()
     if pw:
         cfg["password"] = "" if pw.lower() == "none" else pw
     print("\n  When you host:")
-    pw = input(f"  Password for your server [{cfg.get('host_password') or 'none'}]: ").strip()
+    pw = companion.ask(f"  Password for your server [{cfg.get('host_password') or 'none'}]: ").strip()
     if pw:
         cfg["host_password"] = "" if pw.lower() == "none" else pw
-    port = input(f"  Port for your server [{cfg.get('host_port') or 24242}]: ").strip()
+    port = companion.ask(f"  Port for your server [{cfg.get('host_port') or 24242}]: ").strip()
     if port.isdigit():
         cfg["host_port"] = int(port)
     companion.save_config(cfg)
@@ -100,7 +100,7 @@ def host_settings(cfg: dict, args) -> tuple[int, str, str]:
     if args.motd is not None:
         cfg["host_motd"] = args.motd
     if "host_password" not in cfg and interactive():
-        cfg["host_password"] = input("  Pick a password so only your friends can join (or just press Enter for none): ").strip()
+        cfg["host_password"] = companion.ask("  Pick a password so only your friends can join (or just press Enter for none): ").strip()
         if cfg["host_password"]:
             print("  Friends type it in the in-game panel: Settings, Password, then Save.")
         print()

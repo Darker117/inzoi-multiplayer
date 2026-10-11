@@ -39,13 +39,37 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 log = logging.getLogger("companion")
+
+
+def interactive() -> bool:
+    """Someone can answer questions in this window. (On Windows a redirected "NUL" input also claims to be a terminal,
+    so check that it's a real console.)"""
+    if not (sys.stdin and sys.stdin.isatty()):
+        return False
+    if os.name != "nt":
+        return True
+    import ctypes
+    import msvcrt
+    try:
+        return bool(ctypes.windll.kernel32.GetConsoleMode(msvcrt.get_osfhandle(sys.stdin.fileno()),
+                                                          ctypes.byref(ctypes.c_uint())))
+    except (OSError, ValueError):
+        return False
+
+
+def ask(prompt: str) -> str:
+    """input(), but the end of input counts as just pressing Enter."""
+    try:
+        return input(prompt)
+    except EOFError:
+        return ""
 
 
 def size_text(n: int) -> str:
@@ -56,12 +80,14 @@ def size_text(n: int) -> str:
 def first_run_setup(cfg: dict, ask_server: bool = True):
     """Ask for what a new player must know (it can be changed later in the in-game panel)."""
     what = "Two quick questions" if ask_server else "One quick question"
-    print(f"\n  Welcome to inZOI Multiplayer! {what} (change it any time in the in-game panel).\n")
-    name = input(f"  Your name, as friends will see it [{cfg.get('name') or os.environ.get('USERNAME', 'Player')}]: ").strip()
+    print(f"\n  Welcome to inZOI Multiplayer! {what} (change it any time: type 4 in the menu).\n")
+    name = ask(f"  Your name, as friends will see it [{cfg.get('name') or os.environ.get('USERNAME', 'Player')}]: ").strip()
     if name:
         cfg["name"] = name
-    while ask_server and not cfg.get("server"):
-        addr = input("  Server address (the friend who hosts gives it to you, e.g. 100.101.102.103): ").strip()
+    for _ in range(5 if ask_server else 0):
+        if cfg.get("server"):
+            break
+        addr = ask("  Server address (the friend who hosts gives it to you, e.g. 100.101.102.103): ").strip()
         if addr:
             host, _, port = addr.partition(":")
             cfg["server"] = host
@@ -79,7 +105,7 @@ def load_config(args, ask_server: bool = True) -> dict:
     ask_server=False when hosting: the companion then connects to the server in this same program."""
     cfg = read_config()
     need_server = ask_server and not cfg.get("server") and not args.server
-    if (need_server or (not cfg.get("name") and not args.name)) and sys.stdin and sys.stdin.isatty():
+    if (need_server or (not cfg.get("name") and not args.name)) and interactive():
         first_run_setup(cfg, need_server)
     cfg.setdefault("key", secrets.token_urlsafe(24))
     for k in ("server", "port", "name", "password"):
@@ -682,7 +708,7 @@ class Companion:
 
     def ask_console(self, o: dict):
         """Ask in the program's window too (the in-game panel asks as well; whichever answers first counts)."""
-        if self.asking or not (sys.stdin and sys.stdin.isatty()):
+        if self.asking or not interactive():
             return
         self.asking = True
         loop = asyncio.get_running_loop()
