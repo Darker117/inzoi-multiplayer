@@ -44,19 +44,51 @@ def interactive() -> bool:
     return bool(sys.stdin and sys.stdin.isatty())
 
 
+def server_text(cfg: dict) -> str:
+    port = int(cfg.get("port") or 24242)
+    return (cfg.get("server") or "") + ("" if port == 24242 or not cfg.get("server") else f":{port}")
+
+
 def choose_mode(cfg: dict) -> str:
-    modes = [m for m, _, _ in MENU]
+    """The start menu: one of MENU's modes, or "settings"."""
+    modes = [m for m, _, _ in MENU] + ["settings"]
     default = modes.index(cfg["mode"]) + 1 if cfg.get("mode") in modes else 1
     print(f"\n  inZOI Multiplayer {companion.VERSION}\n")
     for i, (mode, title, what) in enumerate(MENU, 1):
         if mode == "play" and cfg.get("server"):
-            what += f" ({cfg['server']})"
+            what += f" ({server_text(cfg)})"
         print(f"    {i}  {title:<16}{what}")
+    print(f"    4  {'Settings':<16}change your name, the server address or the passwords")
     while True:
-        pick = input(f"\n  Type 1, 2 or 3 and press Enter [{default}]: ").strip() or str(default)
-        if pick in ("1", "2", "3"):
+        pick = input(f"\n  Type 1, 2, 3 or 4 and press Enter [{default}]: ").strip() or str(default)
+        if pick in ("1", "2", "3", "4"):
             print()
             return modes[int(pick) - 1]
+
+
+def edit_settings(cfg: dict):
+    """Menu 4: change what was typed in before. Enter keeps the value shown in [brackets]."""
+    print("  Settings. Press Enter to keep what's in [brackets]. Type none to remove a password.\n")
+    name = input(f"  Your name [{cfg.get('name') or ''}]: ").strip()
+    if name:
+        cfg["name"] = name
+    print("\n  When you join a friend:")
+    addr = input(f"  Server address [{server_text(cfg) or 'none'}]: ").strip()
+    if addr:
+        host, _, port = addr.partition(":")
+        cfg["server"], cfg["port"] = host.strip(), int(port) if port.strip().isdigit() else 24242
+    pw = input(f"  Password of that server [{cfg.get('password') or 'none'}]: ").strip()
+    if pw:
+        cfg["password"] = "" if pw.lower() == "none" else pw
+    print("\n  When you host:")
+    pw = input(f"  Password for your server [{cfg.get('host_password') or 'none'}]: ").strip()
+    if pw:
+        cfg["host_password"] = "" if pw.lower() == "none" else pw
+    port = input(f"  Port for your server [{cfg.get('host_port') or 24242}]: ").strip()
+    if port.isdigit():
+        cfg["host_port"] = int(port)
+    companion.save_config(cfg)
+    print("\n  Saved.")
 
 
 def host_settings(cfg: dict, args) -> tuple[int, str, str]:
@@ -133,7 +165,9 @@ async def run(mode: str, cfg: dict, comp):
         show_addresses(args.port, args.password)
     if comp:
         if mode == "play":
-            print(f"\n  Connecting to {cfg['server']} as {cfg['name']}. (To change either: Settings in the in-game panel.)")
+            print(f"\n  Connecting to {server_text(cfg)} as {cfg['name']}.")
+            print("  (Wrong address or name? Change it in the in-game panel's Settings, or close this window, open")
+            print("  the program again and type 4.)")
         print("  Now start inZOI and load your save: the inZOI Multiplayer panel appears in the game.")
         print("  Keep this window open while you play, and close it when you're done.\n")
         await comp.run()
@@ -165,7 +199,12 @@ def main():
             k32.SetConsoleMode(stdin, (mode.value & ~0x40) | 0x80)
     companion.setup_logging(args.verbose)
     saved = companion.read_config()
-    mode = args.mode or (choose_mode(saved) if interactive() else saved.get("mode", "play"))
+    mode = args.mode or (None if interactive() else saved.get("mode", "play"))
+    while not mode:
+        mode = choose_mode(saved)
+        if mode == "settings":
+            edit_settings(saved)
+            mode = None
     if mode == "host-only":
         cfg = saved                                       # a server needs no player settings
     else:

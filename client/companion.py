@@ -36,7 +36,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 

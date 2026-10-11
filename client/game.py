@@ -88,6 +88,11 @@ class Game:
             return "out"
         if s.get("phase") != "in_game" or (s.get("blocking") or {}).get("pause_reasons"):
             return "paused"
+        try:
+            if self.call("environment.get_simulation").get("is_paused"):
+                return "paused"                 # the time controls are on pause: the mod's per-frame code stops too
+        except GameError:
+            pass
         return "play"
 
     def possessed(self) -> int:

@@ -13,6 +13,8 @@ WHAT DO YOU WANT TO DO?
   B. HOST AND PLAY     you run the server on your PC, and you play too
   C. HOST ONLY         you run the server for your friends (a PC or a Raspberry Pi), without playing on it
 
+To change your name, the server address or a password later: open the program and type 4 (Settings).
+
 Everyone needs inZOI on Windows (all on the same game version) and the file "inZOI Multiplayer.exe".
 
 The first time you open "inZOI Multiplayer.exe", Windows may say "Windows protected your PC". That's only because
@@ -33,19 +35,21 @@ Your host gives you:  the server address (it looks like 100.101.102.103)
 3. The first time, it asks two things:
      Your name ........... what your friends will see
      Server address ...... the address your host gave you
-   It remembers them: next time, just press Enter.
+   It remembers them: next time, just press Enter. To change them, type 4 (Settings) instead of 1.
 4. Start inZOI and load your save. The inZOI Multiplayer panel appears on the left of the screen.
    Keep the program's window open while you play. Close it when you're done.
 
-If your host uses a password: in the panel, click Settings, type it in Password, click Save.
+If your host uses a password: open the program, type 4 (Settings) and enter it at "Password of that server".
+(Or in the game: the panel's Settings, Password, Save.)
 
 
 B. HOST AND PLAY
 ----------------
 1. Double-click "inZOI Multiplayer.exe". Type 2 and press Enter.
-2. The first time, it asks for your name and a password (optional: press Enter for none).
+2. The first time, it asks for your name and a password (optional: press Enter for none). To change them
+   later, type 4 (Settings) instead of 2.
    If Windows asks whether inZOI Multiplayer may use the network, click Allow.
-3. The window shows the address to give your friends:
+3. The window shows the address and password to give your friends:
      100.x.x.x ......... for friends anywhere, through Tailscale (see PLAYING OVER THE INTERNET below)
      192.168.x.x ....... for friends in your home
 4. Start inZOI and load your save. Keep the window open while you and your friends play.
@@ -55,7 +59,7 @@ C. HOST ONLY
 ------------
 On a Windows PC:
   Double-click "inZOI Multiplayer.exe", type 3 and press Enter. It works like B, without the game. The window
-  shows the address to give your friends. Keep it open while they play.
+  shows the address and password to give your friends. Keep it open while they play. (Password or port: type 4.)
 
 On a Raspberry Pi or another Linux computer:
   1. Copy the "server for Raspberry Pi or Linux" folder to it and run:   python3 inzoi_mp_server.py
@@ -111,7 +115,9 @@ Everyone plays their own save, so a friend's house isn't in your world until you
 IF SOMETHING'S WRONG
 --------------------
 - The panel says the program isn't running: open "inZOI Multiplayer.exe" and keep its window open.
-- "Can't reach the server": check the address (panel: Settings). If you play over the internet, check that
+- Wrong server address, name or password: close the program, open it again and type 4 (Settings). Then type 1
+  (or 2) to start again.
+- "Can't reach the server": check the address (type 4, Settings). If you play over the internet, check that
   Tailscale is on (Connected) on your PC. Ask the host whether their server window is open.
 - To switch between joining and hosting: close the program and open it again. It shows the menu every time
   (Enter picks what you chose last time).
