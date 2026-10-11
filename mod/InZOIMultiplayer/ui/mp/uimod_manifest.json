@@ -1,6 +1,6 @@
 {
 	"name": "inZOI Multiplayer",
-	"version": "0.5.1",
+	"version": "0.5.2",
 	"description": "Players online, chat, joining friends, mods and the multiplayer save.",
 	"author": "",
 	"entry": "index.html",
