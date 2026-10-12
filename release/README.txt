@@ -104,9 +104,10 @@ THE MULTIPLAYER MENU
 inZOI's main menu has a "Multiplayer" item, under New Game: a real game button. It opens the servers page inside
 the game, made of the game's own Mods page parts; Back or Esc returns to the main menu. In the game (a save
 loaded), the panel's "Servers" button opens the servers page in a browser window.
-For this the program adds UE4SS (an open-source script loader for Unreal games, MIT license) next to the game the
-first time you say yes: "dwmapi.dll" and a "ue4ss" folder in inZOI\BlueClient\Binaries\Win64. Nothing of the game's
-own changes. To take it out: close inZOI, open the program, type 4 (Settings), and answer "off" for the button.
+For this the program adds UE4SS (an open-source script loader for Unreal games, MIT license) next to the game by
+itself: "dwmapi.dll" and a "ue4ss" folder in inZOI\BlueClient\Binaries\Win64 (it shows you where). Nothing of the
+game's own changes. To take it out: close inZOI and delete those two; to keep it out, also type 4 (Settings) in the
+program and answer "off" for the button.
 Without UE4SS the program draws the Multiplayer item over the menu itself (then the game must be in windowed or
 borderless full screen) and the servers page opens in a browser window.
   - Public Servers: servers anyone can join, with how many play there, their ping and their mods. Select one to
@@ -192,7 +193,8 @@ Everyone plays their own save, so a friend's house isn't in your world until you
 IF SOMETHING'S WRONG
 --------------------
 - The panel says the program isn't running: open "inZOI Multiplayer.exe" and keep its window open.
-- No "Multiplayer" on the main menu: right after the program added UE4SS, restart inZOI once. A dimmed
+- No "Multiplayer" on the main menu: the program restarts inZOI after adding it; if you were in a save, restart
+  inZOI yourself once. A dimmed
   "Multiplayer" means the program isn't running: open it. (Without UE4SS the item is drawn by the program: then
   the game has to be the window in front and in windowed or borderless full screen.)
 - Wrong server address, name or password: on the main menu, Multiplayer, then the server's Edit button. (Or close

@@ -94,9 +94,10 @@ servers page, so the tabs, filters, server rows, details, buttons and dialogs ar
 returns to the main menu.
 
 The item and the page come from a small script run by [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) (an open-source
-script loader for Unreal Engine games, MIT license). The program asks once, then puts UE4SS and the script next to
-the game (`dwmapi.dll` and a `ue4ss` folder in inZOI's `BlueClient/Binaries/Win64`); nothing of the game's own
-changes, and the program's Settings (4) can take it out again. Without it, the program draws a stand-in item over the
+script loader for Unreal Engine games, MIT license). The program puts UE4SS and the script next to the game by
+itself (`dwmapi.dll` and a `ue4ss` folder in inZOI's `BlueClient/Binaries/Win64`, and it prints where) and restarts
+inZOI if it's sitting on its main menu, so the button shows up right away. Nothing of the game's own changes: to
+take it out, delete those two (and turn the button off in the program's Settings, 4, or it comes back). Without it, the program draws a stand-in item over the
 menu and opens the servers page in a full-screen browser window. In the game (a save loaded), the panel's
 **Servers** button opens that browser page too.
 

@@ -222,6 +222,79 @@ def installer_tests(tmp: Path):
         print("  ok: another dwmapi.dll: refused")
 
 
+def launcher_tests(tmp: Path):
+    """First start with inZOI on its main menu: UE4SS goes in by itself, the player is told where, and inZOI is
+    restarted through its own Exit Game (then started again). In a save it's left alone."""
+    if not ue4ss.available():
+        print("  (skipped: no UE4SS runtime)")
+        return
+    import contextlib
+    import io
+    os.environ["APPDATA"] = str(tmp / "appdata")
+    import companion
+    import game as game_mod
+    import launcher
+    import menu
+    companion.CONFIG_DIR = tmp / "appdata" / "inzoi-mp"
+    calls, started = [], []
+    running = {"game": True, "phase": "lobby"}
+
+    class FakeGame:
+        def __init__(self, *a):
+            pass
+
+        def call(self, tool, **args):
+            calls.append((tool, args))
+            if tool == "game.get_state":
+                return {"phase": running["phase"]}
+            if tool == "ui.list_windows":
+                return {"_text": "1 window(s).\n" + json.dumps({"windows": [{"window": "WBP_Lobby_C_1",
+                                                                              "ui_type": "MainMenu"}]})}
+            if tool == "ui.click":
+                running["game"] = False
+                return {"clicked": True}
+            return {}
+
+    for case in ("lobby", "in_game"):
+        game = tmp / f"game_{case}"
+        game.mkdir()
+        (game / ue4ss.GAME_EXE).write_bytes(b"")
+        running.update(game=True, phase="lobby" if case == "lobby" else "in_game")
+        calls.clear()
+        started.clear()
+        launcher.GAME_STARTED = False
+        cfg = {}
+        out = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(contextlib.redirect_stdout(out))
+            orig = (ue4ss.game_binaries, menu.game_window, game_mod.Game, os.startfile, launcher.time.sleep,
+                    companion.save_config)
+            ue4ss.game_binaries = lambda cfg=None, g=game: g
+            menu.game_window = lambda: 1 if running["game"] else None
+            game_mod.Game = FakeGame
+            os.startfile = lambda url: started.append(url)
+            launcher.time.sleep = lambda s: None
+            companion.save_config = lambda c: None
+            try:
+                launcher.setup_ingame(cfg)
+                launcher.offer_game()
+            finally:
+                (ue4ss.game_binaries, menu.game_window, game_mod.Game, os.startfile, launcher.time.sleep,
+                 companion.save_config) = orig
+        text = out.getvalue()
+        check((game / "dwmapi.dll").exists() and cfg.get("ingame_menu") is True, f"{case}: installed without asking")
+        check(str(game) in text and "dwmapi.dll" in text and "ue4ss" in text, f"{case}: told where it is")
+        clicked = [a for tool, a in calls if tool == "ui.click"]
+        if case == "lobby":
+            check(clicked and clicked[0]["ref"].endswith("BW_WBP_Button_Exit/BW_Button") and started == [launcher.GAME_URL],
+                  "on the main menu: inZOI restarted once")
+        else:
+            check(not clicked and not started and "next time" in text, "in a save: left alone")
+    off = {"ingame_menu": False}
+    launcher.setup_ingame(off)
+    check(off == {"ingame_menu": False}, "turned off in Settings: nothing happens")
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
@@ -229,6 +302,8 @@ def main():
         asyncio.run(brain_tests(tmp))
         print("installer:")
         installer_tests(tmp)
+        print("first start:")
+        launcher_tests(tmp)
     print("all in-game tests passed")
 
 

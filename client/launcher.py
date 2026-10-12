@@ -15,6 +15,7 @@ into the exe.
 """
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -37,6 +38,7 @@ MENU = [("play", "Join a friend", "connect to the server your friend hosts"),
         ("host-only", "Host only", "just run the server for your friends (no game needed)")]
 SERVER_DATA = companion.SERVER_DATA
 GAME_URL = "steam://rungameid/2456740"
+GAME_STARTED = False                    # this program already started inZOI (after adding the menu button)
 
 
 def interactive() -> bool:
@@ -258,46 +260,74 @@ def main():
 
 
 def setup_ingame(cfg: dict):
-    """The real "Multiplayer" item on inZOI's main menu (and the servers page inside the game) need UE4SS, a script
-    loader, next to the game. Ask once; after a yes, keep it and our script up to date every start."""
-    if os.name != "nt" or not ue4ss.available():
-        return
-    if cfg.get("ingame_menu") is None:
-        if not interactive():
-            return
-        print()
-        print("  inZOI Multiplayer can put a real \"Multiplayer\" button on inZOI's main menu, with the servers page")
-        print("  inside the game. For that it adds UE4SS (an open-source script loader for Unreal games) next to the")
-        print("  game: one file and one folder in its Binaries folder. Nothing of the game's own changes, and you can")
-        print("  take it out again any time (main menu of this program: Settings).")
-        answer = companion.ask("  Add it? Type y or n [y]: ").strip().lower()
-        cfg["ingame_menu"] = not answer.startswith("n")
-        companion.save_config(cfg)
-    if not cfg.get("ingame_menu"):
+    """The real "Multiplayer" item on inZOI's main menu (and the servers page inside the game) come from UE4SS, a
+    script loader next to the game. Installed and kept up to date by itself every start (unless turned off in
+    Settings); the first time, the player is told where it is, and inZOI restarts if it's sitting on its main menu."""
+    if os.name != "nt" or not ue4ss.available() or cfg.get("ingame_menu") is False:
         return
     binaries = ue4ss.game_binaries(cfg)
     if not binaries:
-        print("  Couldn't find inZOI's folder for the main menu's Multiplayer button. Start inZOI, then this program.")
+        log.info("inZOI's folder not found yet: the main menu's Multiplayer button comes once inZOI has run")
         return
-    if cfg.get("game_bin") != str(binaries):
-        cfg["game_bin"] = str(binaries)
+    if cfg.get("game_bin") != str(binaries) or cfg.get("ingame_menu") is None:
+        cfg["game_bin"], cfg["ingame_menu"] = str(binaries), True
         companion.save_config(cfg)
     try:
         st = ue4ss.install(binaries, companion.VERSION, companion.CONFIG_DIR / "ingame")
     except (OSError, RuntimeError) as e:
         print(f"  Couldn't add the Multiplayer button to inZOI's main menu: {e}")
         return
-    if st.get("restart") and menu.game_window():
-        print("  The Multiplayer button shows up on inZOI's main menu the next time you start inZOI.")
+    if not st.get("restart"):
+        return
+    print("\n  Added a \"Multiplayer\" button to inZOI's main menu. It runs on UE4SS, a script loader, here:")
+    print(f"    {binaries}")
+    print("  (the file dwmapi.dll and the folder ue4ss there). To take it out, delete those two.")
+    if menu.game_window():
+        restart_game()
+
+
+def restart_game():
+    """inZOI loads the button when it starts: if it's on its main menu (nothing to lose there), restart it now."""
+    import game as game_mod
+    g = game_mod.Game()
+    try:
+        state = g.call("game.get_state")
+        if not (isinstance(state, dict) and state.get("phase") == "lobby"):
+            print("  It shows up the next time you start inZOI.")
+            return
+        res = g.call("ui.list_windows")
+        text = res.get("_text", "") if isinstance(res, dict) else ""
+        data = json.loads(text[text.index("{"):]) if "{" in text else res
+        lobby = next((w["window"] for w in data.get("windows") or [] if w.get("ui_type") == "MainMenu"), None)
+        if not lobby:
+            print("  It shows up the next time you start inZOI.")
+            return
+        print("  Restarting inZOI so it shows up...")
+        g.call("ui.click", ref=f"{lobby}/BW_WBP_Button_Exit/BW_Button", force=True)     # the game's own Exit Game
+    except (game_mod.GameError, OSError, ValueError) as e:
+        log.info("couldn't restart inZOI: %s", e)
+        print("  It shows up the next time you start inZOI.")
+        return
+    for _ in range(120):                                 # (it saves its settings and closes)
+        if not menu.game_window():
+            break
+        time.sleep(0.5)
+    else:
+        print("  inZOI didn't close: restart it yourself to see the button.")
+        return
+    time.sleep(2)
+    global GAME_STARTED
+    GAME_STARTED = True
+    os.startfile(GAME_URL)                                           # noqa: S606 - Steam starts the game
+    print("  Starting inZOI again...")
 
 
 def offer_game():
-    """The "Multiplayer" item on the game's main menu needs this program running: offer to start inZOI with it."""
-    if os.name != "nt" or not interactive() or menu.game_window():
+    """The "Multiplayer" item on the game's main menu needs this program running: start inZOI along with it."""
+    if os.name != "nt" or not interactive() or GAME_STARTED or menu.game_window():
         return
-    if not companion.ask("  inZOI isn't running. Start it now? Type y or n [y]: ").strip().lower().startswith("n"):
-        os.startfile(GAME_URL)                                           # noqa: S606 - Steam starts the game
-        print("  Starting inZOI...")
+    os.startfile(GAME_URL)                                           # noqa: S606 - Steam starts the game
+    print("  Starting inZOI...")
 
 
 def pause():
