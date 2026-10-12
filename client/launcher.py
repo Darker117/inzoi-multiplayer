@@ -15,13 +15,8 @@ into the exe.
 """
 import argparse
 import asyncio
-import ipaddress
-import json
 import logging
 import os
-import shutil
-import socket
-import subprocess
 import sys
 import time
 import traceback
@@ -31,14 +26,16 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE), str(HERE.parent / "server")]
 import companion  # noqa: E402
 import inzoi_mp_server as mpserver  # noqa: E402
+import menu  # noqa: E402
+import netinfo  # noqa: E402
 import updater  # noqa: E402
 
 log = logging.getLogger("launcher")
 MENU = [("play", "Join a friend", "connect to the server your friend hosts"),
         ("host", "Host and play", "your friends connect to you, and you play too"),
         ("host-only", "Host only", "just run the server for your friends (no game needed)")]
-SERVER_DATA = companion.CONFIG_DIR / "server"
-TAILNET = ipaddress.ip_network("100.64.0.0/10")
+SERVER_DATA = companion.SERVER_DATA
+GAME_URL = "steam://rungameid/2456740"
 
 
 def interactive() -> bool:
@@ -111,36 +108,10 @@ def host_settings(cfg: dict, args) -> tuple[int, str, str]:
     return int(cfg["host_port"]), cfg["host_password"], cfg["host_motd"]
 
 
-def lan_address() -> str | None:
-    """This PC's address on the home network (the interface that leads to the internet; nothing is sent)."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("192.0.2.1", 9))
-        ip = s.getsockname()[0]
-        return None if ip.startswith("127.") or ipaddress.ip_address(ip) in TAILNET else ip
-    except OSError:
-        return None
-    finally:
-        s.close()
-
-
-def tailscale_self() -> tuple[str | None, str | None]:
-    """(MagicDNS name, Tailscale IPv4) of this PC, if it's on Tailscale."""
-    exe = shutil.which("tailscale") or r"C:\Program Files\Tailscale\tailscale.exe"
-    try:
-        out = subprocess.run([exe, "status", "--json", "--peers=false"], capture_output=True, text=True, timeout=5,
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        me = json.loads(out.stdout).get("Self") or {}
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None, None
-    ips = [ip for ip in me.get("TailscaleIPs") or [] if "." in ip]
-    return (me.get("DNSName") or "").rstrip(".") or None, ips[0] if ips else None
-
-
 def show_addresses(port: int, password: str):
     at = "" if port == 24242 else f":{port}"
-    _, ts_ip = tailscale_self()                          # the IP, not the name: a renamed PC gets a new name
-    lan = lan_address()
+    _, ts_ip = netinfo.tailscale_self()                  # the IP, not the name: a renamed PC gets a new name
+    lan = netinfo.lan_address()
     print("\n  Your server is running. Tell your friends to type this as the server address:\n")
     if ts_ip:
         print(f"    {ts_ip + at:<22} friends anywhere (over Tailscale: share this PC with them in Tailscale first)")
@@ -169,25 +140,32 @@ async def fetch_update():
 
 
 async def run(mode: str, cfg: dict, comp):
-    if mode != "play":
+    if mode == "host-only":
         args = argparse.Namespace(host="0.0.0.0", port=cfg["host_port"], password=cfg["host_password"],
-                                  motd=cfg["host_motd"], max_players=16, data=str(SERVER_DATA),
-                                  hosted=mode == "host")         # host and play: the host's mods are everyone's
+                                  motd=cfg["host_motd"], max_players=None, data=str(SERVER_DATA), hosted=False,
+                                  name=cfg.get("host_name") or None, directory=bool(cfg.get("host_directory")))
         try:
-            hosted = await mpserver.start(args)          # noqa: F841 - keep it referenced while we run
+            hosted = await mpserver.start(args)
         except OSError as e:
             raise SystemExit(f"Can't host on port {args.port}: {e.strerror or e}. Is a server already running on "
                              "this PC?") from None
-        show_addresses(args.port, args.password)
+        show_addresses(args.port, hosted[0].mp_server.password)
+    elif mode == "host":
+        try:
+            await comp.start_hosting(play=True)          # host and play: the host's mods are everyone's
+        except ValueError as e:
+            raise SystemExit(str(e)) from None
+        show_addresses(*comp.hosting)
     if comp:
         if mode == "play":
             print(f"\n  Connecting to {server_text(cfg)} as {cfg['name']}.")
             print("  (Wrong address or name? Change it in the in-game panel's Settings, or close this window, open")
             print("  the program again and type 4.)")
+        print("  On inZOI's main menu, click Multiplayer to see servers, join one, or host your own.")
         if cfg.get("mp_save"):
-            print("  Now start inZOI and wait at the main menu: your multiplayer save loads by itself.")
+            print("  Wait at the main menu and your multiplayer save loads by itself.")
         else:
-            print("  Now start inZOI and load the save you want to play with friends (you'll be asked about it).")
+            print("  Load the save you want to play with friends (you'll be asked about it).")
         print("  Keep this window open while you play, and close it when you're done.\n")
         await comp.run()
     else:
@@ -248,18 +226,26 @@ def main():
     if mode != "host-only":
         comp = companion.Companion(cfg)
         comp.restart_args = [f"--{mode}"]
-        if mode == "host":
-            comp.hosting = (int(cfg["host_port"]), cfg["host_password"])
-        companion.on_console_close(comp.despawn_all)
+        companion.on_console_close(comp.shutdown)
         where = "your own server (this PC)" if mode == "host" else f"server {cfg['server']}:{cfg['port']}"
         log.info("inZOI Multiplayer %s - %s, your name %s", companion.VERSION, where, cfg["name"])
+        offer_game()
     try:
         asyncio.run(run(mode, cfg, comp))
     except KeyboardInterrupt:
         if comp:
-            comp.despawn_all()
+            comp.shutdown()
             time.sleep(0.5)
         log.info("stopped")
+
+
+def offer_game():
+    """The "Multiplayer" item on the game's main menu needs this program running: offer to start inZOI with it."""
+    if os.name != "nt" or not interactive() or menu.game_window():
+        return
+    if not companion.ask("  inZOI isn't running. Start it now? Type y or n [y]: ").strip().lower().startswith("n"):
+        os.startfile(GAME_URL)                                           # noqa: S606 - Steam starts the game
+        print("  Starting inZOI...")
 
 
 def pause():

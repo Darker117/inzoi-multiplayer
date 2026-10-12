@@ -325,7 +325,7 @@
         // Title-bar click restores when minimized (ignore drag / child buttons).
         titleBar.addEventListener('click', function(e) {
             if (root._wasDragged) return;
-            if (e.target.id === 'minimize-btn' || e.target.id === 'close-btn') return;
+            if (e.target.id === 'minimize-btn' || e.target.id === 'close-btn' || e.target.id === 'servers-btn') return;
             if (root._minimized) toggle();
         });
     })();
@@ -334,7 +334,7 @@
         var handle = document.getElementById('title-bar');
         var ox, oy, dragging = false;
         handle.addEventListener('mousedown', function(e) {
-            if (e.target.id === 'minimize-btn' || e.target.id === 'close-btn') return;
+            if (e.target.id === 'minimize-btn' || e.target.id === 'close-btn' || e.target.id === 'servers-btn') return;
             dragging = true; root._wasDragged = false;
             ox = e.clientX - root.offsetLeft; oy = e.clientY - root.offsetTop;
         });

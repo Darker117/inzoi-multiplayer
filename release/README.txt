@@ -14,6 +14,7 @@ WHAT DO YOU WANT TO DO?
   C. HOST ONLY         you run the server for your friends (a PC or a Raspberry Pi), without playing on it
 
 To change your name, the server address or a password later: open the program and type 4 (Settings).
+Or, easier: while the program runs, inZOI's main menu has a "Multiplayer" item (see THE MULTIPLAYER MENU).
 
 Everyone needs inZOI on Windows (all on the same game version) and the file "inZOI Multiplayer.exe".
 
@@ -36,7 +37,8 @@ Your host gives you:  the server address (it looks like 100.101.102.103)
      Your name ........... what your friends will see
      Server address ...... the address your host gave you
    It remembers them: next time, just press Enter. To change them, type 4 (Settings) instead of 1.
-4. Start inZOI.
+4. Start inZOI (the program offers to start it for you).
+     On the main menu, "Multiplayer" shows the servers: you can join another one there any time.
      The first time: load the save you want to play with friends. The program asks whether to make a
      multiplayer copy of it (see YOUR MULTIPLAYER SAVE).
      After that: just wait at the main menu. The program loads your multiplayer save for you.
@@ -67,7 +69,9 @@ On a Windows PC:
 
 On a Raspberry Pi or another Linux computer:
   1. Copy the "server for Raspberry Pi or Linux" folder to it and run:   python3 inzoi_mp_server.py
-     (add  --password yourpassword  to use a password)
+     (add  --password yourpassword  to use a password,  --name "Our server"  to name it, and  --directory  to
+     have it keep the list of public servers that everyone's Multiplayer menu shows)
+     To become its admin: run  python3 inzoi_mp_server.py --admin-code  and type that code in the Admin Console.
   2. To keep it running all the time, even after a restart, follow the steps at the top of inzoi-mp.service.
   3. The address for your friends is the Pi's Tailscale address (100.x.x.x: see below), or for friends in your
      home, its address on your network (192.168.x.x).
@@ -93,6 +97,31 @@ Each friend does this once:
 
 (Without Tailscale: forward TCP port 24242 to the server in the host's router, and friends use the host's
 public IP address.)
+
+
+THE MULTIPLAYER MENU
+--------------------
+While the program runs, inZOI's main menu has a "Multiplayer" item, under New Game (the program draws it there:
+the game itself has no room for mods on its main menu). It opens the servers page, full screen; Back or Esc
+returns to the game. In the game, the panel's "Servers" button opens it too.
+  - Public Servers: servers anyone can join, with how many play there, their ping and their mods. Select one to
+    see whether you can join: its version, room, password, and which of its mods you have (a tick) or would
+    download (an arrow). Join gets you in; the program then offers the mods you're missing.
+  - Private Servers: servers you added with their address (Add Server), and the one you host. The checkbox keeps a
+    server in this list.
+  - Host a Server: your server runs in the program and you play on it too. Public: listed in Public Servers for
+    everyone. Private: only people you give the address to can join. The page shows the addresses to give.
+  - Admin Console. On your own server: "Server Settings". On someone else's: "Admin Code", then type the code
+    the server's owner gives you. It has:
+      players online (kick, ban, make admin) and everyone who has joined (unban)
+      settings: name, description, welcome message, password, max players, public or private
+      a message to everyone, and restarting the server (everyone's game is saved first, then they reconnect)
+      earlier versions of the shared world, and the server's log
+  - Each server keeps its own multiplayer save: switching servers switches saves, and coming back to a server
+    brings back the save you played there.
+Public servers are listed by a server that keeps the list (one started with --directory, like a Raspberry Pi
+everyone connects to). If your public server shows "can't be reached", friends outside your home can't get to your
+PC: use Tailscale (see PLAYING OVER THE INTERNET) or forward the port in your router.
 
 
 IN THE GAME
@@ -158,8 +187,10 @@ Everyone plays their own save, so a friend's house isn't in your world until you
 IF SOMETHING'S WRONG
 --------------------
 - The panel says the program isn't running: open "inZOI Multiplayer.exe" and keep its window open.
-- Wrong server address, name or password: close the program, open it again and type 4 (Settings). Then type 1
-  (or 2) to start again.
+- No "Multiplayer" on the main menu: the program isn't running, or the game isn't the window in front (click it).
+  It also needs the game in windowed or borderless full screen (Options, Graphics), not exclusive full screen.
+- Wrong server address, name or password: on the main menu, Multiplayer, then the server's Edit button. (Or close
+  the program, open it again and type 4, Settings.)
 - "Can't reach the server": check the address (type 4, Settings). If you play over the internet, check that
   Tailscale is on (Connected) on your PC. Ask the host whether their server window is open.
 - To switch between joining and hosting: close the program and open it again. It shows the menu every time

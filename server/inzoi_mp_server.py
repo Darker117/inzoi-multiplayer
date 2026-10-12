@@ -11,6 +11,14 @@ Runs anywhere Python 3.9+ runs (Raspberry Pi OS, Linux, Windows, macOS). No extr
 
     python3 inzoi_mp_server.py                     # port 24242, data in ./data
     python3 inzoi_mp_server.py --port 24242 --password secret --data /var/lib/inzoi-mp
+    python3 inzoi_mp_server.py --directory         # also keep the list of public servers (see below)
+    python3 inzoi_mp_server.py --admin-code        # print the code that makes a player an admin
+    python3 inzoi_mp_server.py --make-admin Ana    # make a player (by name or id) an admin of the running server
+
+The server's settings (name, description, password, public or private, admins, bans...) live in data/server.json and
+are changed from the admin console on the in-game servers page; --password, --motd, --max-players and --name override
+them at start. A public server is listed by "directories": servers started with --directory that keep the list of
+public servers, check each one can be reached, and hand the list to anyone who asks.
 
 Wire format: one JSON object per line over TCP, UTF-8. Every message has "t" (its type).
 See PROTOCOL.md next to this file.
@@ -20,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import collections
 import hashlib
 import json
 import logging
@@ -27,10 +36,12 @@ import os
 import re
 import secrets
 import signal
+import socket
+import sys
 import time
 from pathlib import Path
 
-VERSION = "0.5.2"
+VERSION = "0.6.0"
 PROTOCOL = 1
 MAX_LINE = 32 * 1024 * 1024        # house snapshots can be large
 PING_EVERY = 15                    # seconds between keepalives
@@ -38,12 +49,62 @@ TIMEOUT = 45                       # drop a client that sent nothing for this lo
 CHUNK = 512 * 1024                 # mod file transfer: bytes per blob_get answer
 SHA = re.compile(r"[0-9a-f]{64}")
 FILE_MESSAGES = {"blob_check", "blob_put", "blob_get", "ping", "pong"}
+BEFORE_HELLO = {"info", "ping", "pong", "dir_announce", "dir_list", "dir_remove"}   # allowed without joining
+HISTORY = 20                       # world versions kept (their files stay on disk: an admin can go back to one)
+ANNOUNCE_EVERY = 60                # seconds between a public server's announcements to its directories
+LISTING_TTL = 180                  # a directory drops a server it hasn't heard from for this long
+RECHECK = 300                      # seconds before a directory checks again that a listed server can be reached
+RESTART_EXIT = 75                  # exit code after an admin's restart (systemd's Restart=always starts it again)
+SETTINGS = {"name": "", "description": "", "motd": "", "public": False, "password": "", "max_players": 16,
+            "public_address": "", "directories": [], "admins": [], "bans": {}}
 
 log = logging.getLogger("inzoi-mp")
+RECENT: collections.deque = collections.deque(maxlen=300)     # the latest log lines, for the admin console
+
+
+class _Recent(logging.Handler):
+    def emit(self, record):
+        RECENT.append(f"{time.strftime('%H:%M:%S', time.localtime(record.created))} {record.getMessage()}")
+
+
+log.addHandler(_Recent())
 
 
 def now() -> float:
     return time.time()
+
+
+def mod_fp(mod: dict) -> str:
+    """A short fingerprint of a mod's content (not its mod_manifest.json): equal on two PCs when they have the very same
+    mod. The companion computes the same (mods.fp) to tell which of a server's mods it has."""
+    return hashlib.sha256("\n".join(sorted(f"{p}:{h}" for p, h in content(mod))).encode()).hexdigest()[:16]
+
+
+def world_summary(meta: dict | None) -> dict | None:
+    return meta and {k: meta.get(k) for k in ("version", "name", "by", "time", "size")}
+
+
+def split_address(address: str, default_port: int = 24242) -> tuple[str, int]:
+    host, _, port = str(address).strip().rpartition(":") if ":" in str(address) else (str(address).strip(), "", "")
+    return (host or str(address).strip()).strip("[]"), int(port) if str(port).isdigit() else default_port
+
+
+async def request(address: str, msg: dict, reply: str, timeout: float = 6) -> dict:
+    """One question to another server (before any hello): send msg, return the first answer of type `reply`."""
+    host, port = split_address(address)
+    r, w = await asyncio.wait_for(asyncio.open_connection(host, port, limit=MAX_LINE), timeout)
+    try:
+        w.write((json.dumps(msg) + "\n").encode())
+        await w.drain()
+        while True:
+            line = await asyncio.wait_for(r.readline(), timeout)
+            if not line:
+                raise ConnectionError("no answer")
+            m = json.loads(line)
+            if m.get("t") in (reply, "error"):
+                return m
+    finally:
+        w.close()
 
 
 class Store:
@@ -51,10 +112,19 @@ class Store:
 
     def __init__(self, root: Path):
         self.root = root
-        for sub in ("houses", "mods", "blobs"):
+        for sub in ("houses", "mods", "blobs", "world_history"):
             (root / sub).mkdir(parents=True, exist_ok=True)
         self.players_file = root / "players.json"
         self.players: dict[str, dict] = self._load(self.players_file, {})
+        self.settings_file = root / "server.json"
+        self.settings: dict = {**SETTINGS, **self._load(self.settings_file, {})}
+        self.settings.setdefault("id", secrets.token_hex(8))                  # who this server is, whatever its address
+        self.settings.setdefault("admin_code", secrets.token_hex(4))          # typed in the admin console: admin
+        self.settings.setdefault("listing_secret", secrets.token_hex(16))     # proves to directories it's this server
+        self.save_settings()
+
+    def save_settings(self) -> None:
+        self._save(self.settings_file, self.settings)
 
     @staticmethod
     def _load(path: Path, default):
@@ -134,7 +204,19 @@ class Store:
         return self._load(self.root / "world_save.json", None)
 
     def set_world_save(self, meta: dict) -> None:
+        """The new current world; the last HISTORY versions are kept so an admin can go back to one."""
         self._save(self.root / "world_save.json", meta)
+        self._save(self.root / "world_history" / f"{meta['version']}.json", meta)
+        for old in sorted(self.root.glob("world_history/*.json"), key=lambda f: int(f.stem) if f.stem.isdigit() else 0)[
+                :-HISTORY]:
+            old.unlink(missing_ok=True)
+
+    def world_history(self) -> list[dict]:
+        out = [self._load(f, None) for f in self.root.glob("world_history/*.json")]
+        return sorted((m for m in out if m), key=lambda m: -m["version"])
+
+    def world_version(self, version: int) -> dict | None:
+        return self._load(self.root / "world_history" / f"{int(version)}.json", None)
 
 
 def clean_files(raw, limit: int = 5000) -> list[dict]:
@@ -177,6 +259,13 @@ class Client:
         self.closed = False
         self.lock = asyncio.Lock()
         self.files = False                 # a second connection of a player, only for mod file transfers
+        self.joined = 0.0
+
+    def ip(self) -> str:
+        return str((self.addr or ("",))[0])
+
+    def local(self) -> bool:
+        return self.ip() in ("127.0.0.1", "::1")
 
     def public(self) -> dict:
         p = self.server.store.players.get(self.id or "", {})
@@ -205,12 +294,20 @@ class Client:
 
 
 class Server:
-    def __init__(self, store: Store, password: str = "", max_players: int = 16, motd: str = "",
-                 hosted: bool = False):
+    def __init__(self, store: Store, password: str | None = None, max_players: int | None = None,
+                 motd: str | None = None, hosted: bool = False, name: str | None = None, directory: bool = False):
         self.store = store
-        self.password = password
-        self.max_players = max_players
-        self.motd = motd
+        for k, v in (("password", password), ("max_players", max_players), ("motd", motd), ("name", name)):
+            if v is not None:                    # given at start (command line, the program's host settings): wins
+                store.settings[k] = v
+        store.save_settings()
+        self.started = now()
+        self.port = 24242                        # set by start(): where players reach this server
+        self.restartable = False                 # a stand-alone server (main()) can be restarted by an admin
+        self.stop_event: asyncio.Event | None = None
+        self.directory: dict[str, dict] | None = {} if directory else None    # public servers this one lists
+        self.public_status: dict[str, dict] = {}  # directory address -> the answer to our last announcement
+        self.announce_now: asyncio.Event | None = None
         self.clients: dict[str, Client] = {}
         self.leader: Client | None = None      # whose world clock/weather everyone follows
         self.world: dict | None = None         # latest world state from the leader
@@ -222,6 +319,34 @@ class Server:
         self.modset_sent: str | None = None
         self.conns: set[Client] = set()        # every open connection, players' and file transfers'
         self.world_offers: dict[str, dict] = {}   # player id -> {sha: size} of the world files they're uploading
+        self.restart_requested = False
+
+    @property
+    def password(self) -> str:
+        return self.store.settings["password"]
+
+    @property
+    def max_players(self) -> int:
+        return int(self.store.settings["max_players"])
+
+    @property
+    def motd(self) -> str:
+        return self.store.settings["motd"]
+
+    def name(self) -> str:
+        host = self.clients.get(self.host_id or "")
+        return self.store.settings["name"] or (f"{host.name}'s server" if host else "") \
+            or f"{socket.gethostname()} (inZOI Multiplayer)"
+
+    def summary(self) -> dict:
+        """What everyone sees about this server (the welcome and server_info messages)."""
+        s = self.store.settings
+        return {"id": s["id"], "name": self.name(), "description": s["description"], "motd": s["motd"],
+                "public": bool(s["public"]), "password": bool(s["password"]), "max_players": self.max_players,
+                "version": VERSION, "hosted": self.hosted, "directory": self.directory is not None}
+
+    def is_admin(self, c: Client) -> bool:
+        return bool(c.id) and (c.id in self.store.settings["admins"] or (self.hosted and c.id == self.host_id))
 
     # ------------------------------------------------------------------ plumbing
     async def broadcast(self, msg: dict, exclude: Client | None = None) -> None:
@@ -272,15 +397,20 @@ class Server:
     # ------------------------------------------------------------------ messages
     async def dispatch(self, c: Client, msg: dict) -> None:
         t = msg.get("t")
-        if t == "announce_restart" and c.id is None and str((c.addr or ("",))[0]) in ("127.0.0.1", "::1"):
-            await self.announce_restart(max(5, min(600, int(msg.get("in") or 60))))     # from this machine only
-            await c.send({"t": "ok"})
+        if c.id is None and c.local() and t in ("announce_restart", "make_admin"):     # from this machine only
+            if t == "announce_restart":
+                await self.announce_restart(max(5, min(600, int(msg.get("in") or 60))))
+                await c.send({"t": "ok"})
+            else:
+                await c.send({"t": "ok", **await self.admin_op("admin_add", {"id": msg.get("who")}, "this machine")})
             return
         if c.id is None:
-            if t != "hello":
+            if t in BEFORE_HELLO:
+                await getattr(self, "on_" + t)(c, msg)
+            elif t != "hello":
                 await c.send({"t": "error", "error": "say hello first"})
-                return
-            await self.on_hello(c, msg)
+            else:
+                await self.on_hello(c, msg)
             return
         if c.files != (t in FILE_MESSAGES - {"ping", "pong"}) and t not in ("ping", "pong"):
             await c.send({"t": "error", "error": f"{t!r} doesn't belong on this connection"})
@@ -307,6 +437,12 @@ class Server:
             return
         name = str(msg.get("name", "")).strip()[:40] or "Player"
         p = self.store.player_for_key(key, name)
+        ban = self.store.settings["bans"].get(p["id"])
+        if ban:
+            await c.send({"t": "error", "fatal": True, "banned": True, "error": "you're banned from this server"
+                          + (f" ({ban['reason']})" if ban.get("reason") else "")})
+            await c.close()
+            return
         if msg.get("files"):                         # the player's file transfer connection: not a second player
             c.id, c.name, c.files = p["id"], name, True
             await c.send({"t": "files_ok"})
@@ -321,9 +457,9 @@ class Server:
             await c.send({"t": "error", "fatal": True, "error": "server is full"})
             await c.close()
             return
-        c.id, c.name = p["id"], name
+        c.id, c.name, c.joined = p["id"], name, now()
         self.clients[c.id] = c
-        is_host = self.hosted and bool(msg.get("host")) and str((c.addr or ("",))[0]) in ("127.0.0.1", "::1")
+        is_host = self.hosted and bool(msg.get("host")) and c.local()
         if is_host:
             self.host_id = c.id
         before = self.leader.id if self.leader else None
@@ -336,6 +472,7 @@ class Server:
             "leader": self.leader.id, "world": self.world, "host": self.host_id,
             "players": [o.public() for o in self.clients.values() if o is not c],
             "houses": self.store.list_houses(), "modset": modset, "world_save": self.store.world_save(),
+            "server": self.summary(), "admin": self.is_admin(c),
         })
         await self.broadcast({"t": "joined", "player": c.public()}, exclude=c)
         if before not in (None, self.leader.id):                    # the clock changed hands
@@ -541,6 +678,294 @@ class Server:
         await self.broadcast({"t": "chat", "id": None, "name": "Server", "time": now(),
                               "text": f"The server restarts in {seconds} seconds: your game is saved first."})
 
+    # ------------------------------------------------------------------ the servers page: info before joining
+    def info(self) -> dict:
+        """Everything the servers page shows about this server before joining it, and what its mods check needs."""
+        ms = self.modset()
+        return {"t": "info", **self.summary(), "protocol": PROTOCOL, "players": len(self.clients),
+                "names": [c.name for c in self.clients.values()][:16],
+                "host": self.clients[self.host_id].name if self.host_id in self.clients else None,
+                "world": world_summary(self.store.world_save()), "uptime": int(now() - self.started),
+                "mods": {"source": ms["source"],
+                         "list": [{"id": m["id"], "name": m["name"], "version": m.get("version", ""),
+                                   "built": m.get("built", ""), "size": m.get("size", 0), "fp": mod_fp(m)}
+                                  for m in ms["mods"]]}}
+
+    async def on_info(self, c: Client, msg: dict) -> None:
+        await c.send(self.info())
+
+    # ------------------------------------------------------------------ admin console
+    async def on_admin(self, c: Client, msg: dict) -> None:
+        """{op, ref, ...}: answered with {t: admin, ref, op, ok, error?, ...}. Only for the server's admins."""
+        op = str(msg.get("op", ""))
+        if not self.is_admin(c):
+            out = {"ok": False, "error": "you're not an admin of this server"}
+        else:
+            try:
+                out = await self.admin_op(op, msg, c.name, c)
+            except (ValueError, TypeError, KeyError) as e:
+                out = {"ok": False, "error": str(e)}
+        await c.send({"t": "admin", "ref": msg.get("ref"), "op": op, **out})
+
+    async def on_admin_claim(self, c: Client, msg: dict) -> None:
+        """Become an admin with the server's admin code (shown to admins, and by --admin-code on the server's PC)."""
+        code = str(msg.get("code", "")).strip().lower()
+        ok = bool(code) and secrets.compare_digest(code, self.store.settings["admin_code"])
+        if ok and c.id not in self.store.settings["admins"]:
+            self.store.settings["admins"].append(c.id)
+            self.store.save_settings()
+            log.info("%s (%s) is an admin now (admin code)", c.name, c.id)
+        await c.send({"t": "admin", "ref": msg.get("ref"), "op": "claim", "ok": ok,
+                      **({} if ok else {"error": "that's not this server's admin code"})})
+
+    def player_name(self, pid: str) -> str:
+        return (self.store.players.get(pid) or {}).get("name") or pid
+
+    def status(self) -> dict:
+        s = self.store.settings
+        ws = self.store.world_save()
+        ms = self.modset()
+        banned = s["bans"]
+        return {
+            "ok": True, "settings": {k: s[k] for k in ("name", "description", "motd", "public", "password",
+                                                       "max_players", "public_address", "directories")},
+            "id": s["id"], "admin_code": s["admin_code"], "version": VERSION, "uptime": int(now() - self.started),
+            "hosted": self.hosted, "restartable": self.restartable, "shown_name": self.name(), "port": self.port,
+            "players": [{"id": c.id, "name": c.name, "ip": c.ip(), "since": c.joined, "admin": self.is_admin(c),
+                         "leader": c is self.leader, "host": c.id == self.host_id} for c in self.clients.values()],
+            "known": [{"id": pid, "name": p.get("name"), "last_seen": p.get("last_seen"), "banned": pid in banned,
+                       "admin": pid in s["admins"], "online": pid in self.clients}
+                      for pid, p in sorted(self.store.players.items(), key=lambda kv: -(kv[1].get("last_seen") or 0))
+                      ][:100],
+            "bans": [{"id": pid, "name": b.get("name") or self.player_name(pid), **b} for pid, b in banned.items()],
+            "admins": [{"id": pid, "name": self.player_name(pid)} for pid in s["admins"]],
+            "world": {**(world_summary(ws) or {}), "history": [world_summary(m) for m in self.store.world_history()]}
+            if ws else None,
+            "mods": {"source": ms["source"], "count": len(ms["mods"]), "size": sum(m.get("size", 0) for m in ms["mods"])},
+            "public_status": self.public_status,
+            "directory": {"listed": len(self.directory)} if self.directory is not None else None,
+            "log": list(RECENT)[-120:],
+        }
+
+    async def admin_op(self, op: str, msg: dict, by: str, c: Client | None = None) -> dict:
+        s = self.store.settings
+        target = str(msg.get("id") or "")
+        if op == "status":
+            return self.status()
+        if op == "set":
+            changed = []
+            for k, cast, limit in (("name", str, 60), ("description", str, 300), ("motd", str, 300),
+                                   ("password", str, 100), ("public_address", str, 200)):
+                if k in msg and str(msg[k]).strip() != s[k]:
+                    s[k] = cast(msg[k]).strip()[:limit]
+                    changed.append(k)
+            if "max_players" in msg and int(msg["max_players"]) != s["max_players"]:
+                s["max_players"] = max(1, min(64, int(msg["max_players"])))
+                changed.append("max_players")
+            if "public" in msg and bool(msg["public"]) != s["public"]:
+                s["public"] = bool(msg["public"])
+                changed.append("public")
+            if "directories" in msg and isinstance(msg["directories"], list):
+                s["directories"] = [str(d).strip()[:200] for d in msg["directories"] if str(d).strip()][:10]
+                changed.append("directories")
+            self.store.save_settings()
+            if changed:
+                log.info("%s changed the server's %s", by, ", ".join(changed))
+                await self.broadcast({"t": "server_info", "server": self.summary()})
+                if {"public", "name", "description", "directories", "public_address", "password"} & set(changed):
+                    if "public" in changed and not s["public"]:
+                        await self.unlist()
+                    if self.announce_now:
+                        self.announce_now.set()
+            return {"ok": True, "changed": changed, "settings": self.status()["settings"]}
+        if op in ("kick", "ban"):
+            if c is not None and target == c.id:
+                raise ValueError("that's you")
+            if target == self.host_id and self.hosted:
+                raise ValueError("the host can't be removed from their own server")
+            reason = str(msg.get("reason", "")).strip()[:200]
+            if op == "ban":
+                if target not in self.store.players:
+                    raise ValueError("no such player")
+                s["bans"][target] = {"name": self.player_name(target), "reason": reason, "time": now(), "by": by}
+                if target in s["admins"]:
+                    s["admins"].remove(target)
+                self.store.save_settings()
+                log.info("%s banned %s%s", by, self.player_name(target), f" ({reason})" if reason else "")
+            who = self.clients.get(target)
+            if who:
+                await who.send({"t": "kicked", "reason": ("banned" if op == "ban" else "kicked") + f" by {by}"
+                                + (f": {reason}" if reason else ""), "by_admin": True})
+                await who.close()
+                await self.drop(who)
+                if op == "kick":
+                    log.info("%s kicked %s%s", by, who.name, f" ({reason})" if reason else "")
+            elif op == "kick":
+                raise ValueError("they're not online")
+            return {"ok": True}
+        if op == "unban":
+            if s["bans"].pop(target, None) is None:
+                raise ValueError("they're not banned")
+            self.store.save_settings()
+            log.info("%s unbanned %s", by, self.player_name(target))
+            return {"ok": True}
+        if op == "admin_add":
+            if target not in self.store.players:
+                target = next((pid for pid, p in self.store.players.items() if p.get("name") == target), target)
+            if target not in self.store.players:
+                raise ValueError("no such player (they need to have joined once)")
+            if target not in s["admins"]:
+                s["admins"].append(target)
+                self.store.save_settings()
+                log.info("%s made %s an admin", by, self.player_name(target))
+            if target in self.clients:
+                await self.clients[target].send({"t": "server_info", "server": self.summary(), "admin": True})
+            return {"ok": True, "id": target, "name": self.player_name(target)}
+        if op == "admin_remove":
+            if target not in s["admins"]:
+                raise ValueError("they're not an admin")
+            s["admins"].remove(target)
+            self.store.save_settings()
+            log.info("%s removed %s as an admin", by, self.player_name(target))
+            if target in self.clients:
+                await self.clients[target].send({"t": "server_info", "server": self.summary(), "admin": False})
+            return {"ok": True}
+        if op == "say":
+            text = str(msg.get("text", "")).strip()[:500]
+            if not text:
+                raise ValueError("nothing to say")
+            await self.broadcast({"t": "chat", "id": None, "name": "Server", "text": text, "time": now()})
+            log.info("[server] %s: %s", by, text)
+            return {"ok": True}
+        if op == "restart":
+            if not self.restartable or self.stop_event is None:
+                raise ValueError("this server runs inside a player's program: restart that program instead")
+            seconds = max(5, min(600, int(msg.get("in") or 30)))
+            log.info("%s restarts the server in %d s", by, seconds)
+            await self.announce_restart(seconds)
+            self.restart_requested = True
+            asyncio.get_running_loop().call_later(seconds + 3, self.stop_event.set)
+            return {"ok": True, "in": seconds}
+        if op == "world_restore":
+            old = self.store.world_version(int(msg.get("version") or 0))
+            if not old:
+                raise ValueError("that version isn't kept any more")
+            missing = [f["p"] for f in old["files"] if not self.store.blob(f["h"]).exists()]
+            if missing:
+                raise ValueError(f"files of that version are gone: {', '.join(missing[:3])}")
+            version = (self.store.world_save() or {}).get("version", 0) + 1
+            meta = {**old, "version": version, "by": f"{by} (back to version {old['version']})", "time": now(),
+                    "pid": None}
+            self.store.set_world_save(meta)
+            log.info("%s made world version %d current again (as version %d)", by, old["version"], version)
+            await self.broadcast({"t": "world_save", **meta})
+            return {"ok": True, "version": version}
+        raise ValueError(f"unknown admin action {op!r}")
+
+    # ------------------------------------------------------------------ public servers: the directory
+    async def on_dir_announce(self, c: Client, msg: dict) -> None:
+        """A public server says it's there: {id, secret, port, address?, name, ...}. It's listed (and checked to be
+        reachable) until it goes quiet for LISTING_TTL seconds or says dir_remove."""
+        if self.directory is None:
+            await c.send({"t": "dir_announce", "ok": False, "error": "this server doesn't keep a list of servers"})
+            return
+        sid, secret = str(msg.get("id", ""))[:32], str(msg.get("secret", ""))[:64]
+        old = self.directory.get(sid)
+        if not re.fullmatch(r"[0-9a-f]{8,32}", sid) or len(secret) < 16 or (old and old["secret"] != secret):
+            await c.send({"t": "dir_announce", "ok": False, "error": "not accepted"})
+            return
+        port = int(msg.get("port") or 24242)
+        address = str(msg.get("address") or "").strip()[:200] or f"{c.ip()}:{port}"
+        entry = {"id": sid, "secret": secret, "address": address, "local": not msg.get("address") and c.local(),
+                 "port": port, "seen": now(), "checked": (old or {}).get("checked", 0.0),
+                 "reachable": (old or {}).get("reachable", False), "error": (old or {}).get("error", "")}
+        for k, limit in (("name", 60), ("description", 300), ("version", 20)):
+            entry[k] = str(msg.get(k) or "")[:limit]
+        for k in ("players", "max_players", "protocol", "mods_count"):
+            entry[k] = int(msg.get(k) or 0)
+        entry["password"], entry["names"] = bool(msg.get("password")), [str(n)[:40] for n in (msg.get("names") or [])][:16]
+        entry["world"] = world_summary(msg.get("world")) if isinstance(msg.get("world"), dict) else None
+        if not old or old["address"] != address or now() - entry["checked"] > RECHECK:
+            entry["checked"] = now()
+            try:
+                answer = await request(address, {"t": "info"}, "info", timeout=5)
+                entry["reachable"] = answer.get("id") == sid
+                entry["error"] = "" if entry["reachable"] else "a different server answers at that address"
+            except (OSError, ValueError, asyncio.TimeoutError, ConnectionError) as e:
+                entry["reachable"], entry["error"] = False, f"can't be reached at {address} ({e or 'timed out'})"
+        if not old:
+            log.info("listing public server %s at %s%s", entry["name"], address,
+                     "" if entry["reachable"] else f" - {entry['error']}")
+        self.directory[sid] = entry
+        await c.send({"t": "dir_announce", "ok": True, "address": address, "reachable": entry["reachable"],
+                      "error": entry["error"]})
+
+    async def on_dir_remove(self, c: Client, msg: dict) -> None:
+        entry = (self.directory or {}).get(str(msg.get("id", "")))
+        if entry and secrets.compare_digest(entry["secret"], str(msg.get("secret", ""))):
+            del self.directory[entry["id"]]
+            log.info("public server %s went private", entry["name"])
+        await c.send({"t": "dir_remove", "ok": True})
+
+    async def on_dir_list(self, c: Client, msg: dict) -> None:
+        """The public servers that can be reached. A server on this same machine is given with the address the
+        asker reached this one at (a Raspberry Pi listing itself is reachable at whatever address its players use)."""
+        mine = c.writer.get_extra_info("sockname")
+        out = []
+        for e in list((self.directory or {}).values()):
+            if now() - e["seen"] > LISTING_TTL:
+                self.directory.pop(e["id"], None)
+                continue
+            if not e["reachable"]:
+                continue
+            address = f"{mine[0]}:{e['port']}" if e["local"] and mine else e["address"]
+            out.append({k: v for k, v in e.items() if k not in ("secret", "local", "checked", "error")}
+                       | {"address": address})
+        await c.send({"t": "dir_list", "servers": out, "error": None if self.directory is not None
+                      else "this server doesn't keep a list of servers"})
+
+    def listing(self) -> dict:
+        s = self.store.settings
+        return {"t": "dir_announce", "id": s["id"], "secret": s["listing_secret"], "port": self.port,
+                "address": s["public_address"], "name": self.name(), "description": s["description"],
+                "version": VERSION, "protocol": PROTOCOL, "players": len(self.clients), "max_players": self.max_players,
+                "password": bool(s["password"]), "names": [c.name for c in self.clients.values()][:16],
+                "mods_count": len(self.modset()["mods"]), "world": world_summary(self.store.world_save())}
+
+    def directories(self) -> list[str]:
+        out = list(self.store.settings["directories"])
+        if self.directory is not None:
+            out.insert(0, f"127.0.0.1:{self.port}")          # a directory lists itself too
+        return out
+
+    async def announcer(self) -> None:
+        """While public: tell each directory about this server every minute (and right after a settings change)."""
+        self.announce_now = asyncio.Event()
+        while True:
+            if self.store.settings["public"]:
+                for d in self.directories():
+                    try:
+                        answer = await request(d, self.listing(), "dir_announce", timeout=10)
+                        self.public_status[d] = {k: answer.get(k) for k in ("ok", "address", "reachable", "error")} \
+                            | {"time": now()}
+                    except (OSError, ValueError, asyncio.TimeoutError, ConnectionError) as e:
+                        self.public_status[d] = {"ok": False, "error": f"can't reach the directory ({e or 'timeout'})",
+                                                 "time": now()}
+            try:
+                await asyncio.wait_for(self.announce_now.wait(), ANNOUNCE_EVERY)
+            except asyncio.TimeoutError:
+                pass
+            self.announce_now.clear()
+
+    async def unlist(self) -> None:
+        s = self.store.settings
+        for d in self.directories():
+            try:
+                await request(d, {"t": "dir_remove", "id": s["id"], "secret": s["listing_secret"]}, "dir_remove", 5)
+            except (OSError, ValueError, asyncio.TimeoutError, ConnectionError):
+                pass
+        self.public_status.clear()
+
     # ------------------------------------------------------------------ keepalive
     async def keepalive(self) -> None:
         while True:
@@ -549,22 +974,32 @@ class Server:
 
 
 async def start(args):
-    """Start serving and return once listening: (asyncio server, keepalive task). The all-in-one app
-    (client/launcher.py) calls this to host inside the same program as the companion."""
+    """Start serving and return once listening: (asyncio server, background tasks). The all-in-one app
+    (client/launcher.py, client/companion.py) calls this to host inside the same program as the companion."""
     store = Store(Path(args.data).expanduser().resolve())
     server = Server(store, password=args.password, max_players=args.max_players, motd=args.motd,
-                    hosted=getattr(args, "hosted", False))
+                    hosted=getattr(args, "hosted", False), name=getattr(args, "name", None),
+                    directory=getattr(args, "directory", False))
+    if getattr(args, "directories", None) is not None:
+        store.settings["directories"] = list(args.directories)
+    if getattr(args, "public", None) is not None:
+        store.settings["public"] = bool(args.public)
+    store.save_settings()
     srv = await asyncio.start_server(server.handle, args.host, args.port, limit=MAX_LINE)
+    server.port = srv.sockets[0].getsockname()[1]
     addrs = ", ".join(str(s.getsockname()[:2]) for s in srv.sockets)
-    log.info("inZOI Multiplayer server %s listening on %s (data: %s)%s", VERSION, addrs, store.root,
-             " - password required" if args.password else "")
+    log.info("inZOI Multiplayer server %s \"%s\" listening on %s (data: %s)%s%s%s", VERSION, server.name(), addrs,
+             store.root, " - password required" if server.password else "",
+             " - public" if store.settings["public"] else "", " - keeps the public server list" if server.directory
+             is not None else "")
     srv.mp_server = server
-    return srv, asyncio.ensure_future(server.keepalive())
+    return srv, asyncio.gather(server.keepalive(), server.announcer())
 
 
 async def main_async(args) -> None:
     srv, ka = await start(args)
     stop = asyncio.Event()
+    srv.mp_server.stop_event, srv.mp_server.restartable = stop, True
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -584,35 +1019,53 @@ async def main_async(args) -> None:
         await asyncio.wait_for(srv.wait_closed(), 5)
     except asyncio.TimeoutError:
         pass
+    return srv.mp_server.restart_requested
 
 
 def main() -> None:
+    env = os.environ.get
     ap = argparse.ArgumentParser(description="inZOI Multiplayer server")
-    ap.add_argument("--host", default=os.environ.get("INZOI_MP_HOST", "0.0.0.0"), help="address to listen on (default all)")
-    ap.add_argument("--port", type=int, default=int(os.environ.get("INZOI_MP_PORT", 24242)))
-    ap.add_argument("--password", default=os.environ.get("INZOI_MP_PASSWORD", ""), help="optional server password")
-    ap.add_argument("--data", default=os.environ.get("INZOI_MP_DATA", str(Path(__file__).resolve().parent / "data")))
-    ap.add_argument("--max-players", type=int, default=int(os.environ.get("INZOI_MP_MAX_PLAYERS", 16)))
-    ap.add_argument("--motd", default=os.environ.get("INZOI_MP_MOTD", ""), help="message shown to players when they join")
+    ap.add_argument("--host", default=env("INZOI_MP_HOST", "0.0.0.0"), help="address to listen on (default all)")
+    ap.add_argument("--port", type=int, default=int(env("INZOI_MP_PORT", 24242)))
+    ap.add_argument("--password", default=env("INZOI_MP_PASSWORD"), help="server password (saved; \"\" for none)")
+    ap.add_argument("--data", default=env("INZOI_MP_DATA", str(Path(__file__).resolve().parent / "data")))
+    ap.add_argument("--max-players", type=int, default=int(env("INZOI_MP_MAX_PLAYERS") or 0) or None)
+    ap.add_argument("--motd", default=env("INZOI_MP_MOTD"), help="message shown to players when they join (saved)")
+    ap.add_argument("--name", default=env("INZOI_MP_NAME"), help="the server's name on the servers page (saved)")
+    ap.add_argument("--directory", action="store_true", default=bool(env("INZOI_MP_DIRECTORY")),
+                    help="also keep the list of public servers that players' servers pages show")
+    ap.add_argument("--public", action="store_true", default=None, help="list this server publicly (saved)")
+    ap.add_argument("--list-on", action="append", metavar="ADDRESS", dest="directories",
+                    help="a server that keeps the public list, to be listed on (saved; repeat for more)")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--announce-restart", type=int, metavar="SECONDS",
                     help="tell the server running on this machine to have everyone save, then exit (restart it after)")
+    ap.add_argument("--admin-code", action="store_true", help="print the code that makes a player an admin")
+    ap.add_argument("--make-admin", metavar="NAME_OR_ID", help="make a player an admin of the server running here")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    if args.announce_restart:
-        async def announce():
+    if args.admin_code:
+        print(Store(Path(args.data).expanduser().resolve()).settings["admin_code"])
+        return
+    if args.announce_restart or args.make_admin:
+        async def tell():
             r, w = await asyncio.open_connection("127.0.0.1", args.port)
-            w.write((json.dumps({"t": "announce_restart", "in": args.announce_restart}) + "\n").encode())
+            msg = {"t": "announce_restart", "in": args.announce_restart} if args.announce_restart else \
+                {"t": "make_admin", "who": args.make_admin}
+            w.write((json.dumps(msg) + "\n").encode())
             await w.drain()
             print(json.loads(await asyncio.wait_for(r.readline(), 10)))
             w.close()
-        asyncio.run(announce())
+        asyncio.run(tell())
         return
+    restart = False
     try:
-        asyncio.run(main_async(args))
+        restart = asyncio.run(main_async(args))
     except KeyboardInterrupt:
         log.info("shutting down")
+    if restart:
+        sys.exit(RESTART_EXIT)
 
 
 if __name__ == "__main__":

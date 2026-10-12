@@ -86,6 +86,28 @@ that links their PCs to the server as if everyone were on the same home network.
 Without Tailscale, the host can forward TCP port 24242 to the server in their router; friends then use the host's
 public IP address.
 
+## The Multiplayer menu
+
+While the program runs, inZOI's main menu has a **Multiplayer** item under New Game. (The game doesn't load mods'
+UI on its main menu, so the program draws the item there itself.) It opens the servers page full screen, styled
+like the game's own Mods page. **Back** or **Esc** returns to the game; in the game, the panel's **Servers** button
+opens it too.
+
+- **Public Servers**: servers anyone can join, with players, ping and mods. Select one to see whether you can
+  join: its version, room, password, and which of its mods you have or would download. **Join** gets you in, and
+  the program offers the mods you're missing.
+- **Private Servers**: servers you added by address (**Add Server**), and the one you host.
+- **Host a Server**: run a server in the program and play on it. **Public** lists it for everyone; private means
+  only people with the address can join.
+- **Admin Console**: players online (kick, ban, make admin), settings (name, description, welcome message,
+  password, max players, public or private), a message to everyone, restarting the server (everyone's game is
+  saved first), earlier versions of the shared world, and the log. On your own server it's **Server Settings**;
+  on another server you become an admin with the code its owner gives you (`inzoi_mp_server.py --admin-code`).
+- Each server keeps its own multiplayer save: switching servers switches saves.
+
+Public servers are listed by a server started with `--directory` (for example a Raspberry Pi everyone uses), which
+checks each listed server can be reached.
+
 ## In the game
 
 The **inZOI Multiplayer** panel (left of the screen; drag it by its title, `_` folds it away):
@@ -95,6 +117,7 @@ The **inZOI Multiplayer** panel (left of the screen; drag it by its title, `_` f
 - **Houses**: share your house, or add a friend's house to your library
 - **Mods**: the mods everyone uses, and downloading the ones you're missing
 - **Settings**: your name, the server address, the password, and following the host's time of day
+- **Servers** (title bar): opens the Multiplayer menu
 
 Friends' Zois appear in your world when you're in the same city. To hang out, travel to the same place or press
 **Join**.
@@ -172,8 +195,12 @@ Everyone needs the same mods to see each other's clothes, hair and things, and t
 - **The game mod** (`mod/InZOIMultiplayer/`) installs itself into `Documents\inZOI\Mods\InGame`. Its Lua
   controller brings friends' Zois into your world as puppets and drives them. Its panel is a UI mod that talks to
   the program on `127.0.0.1:24243`. No game files are changed.
-- **The server** (`server/`) relays live state, chat and houses between players and remembers profiles. See
-  [`server/PROTOCOL.md`](server/PROTOCOL.md).
+- **The server** (`server/`) relays live state, chat and houses between players and remembers profiles. It also
+  answers the servers page (info before joining, the admin console) and, with `--directory`, keeps the list of
+  public servers. See [`server/PROTOCOL.md`](server/PROTOCOL.md).
+- **The servers page** (`client/page/`) is served by the program and opened in a full-screen Edge window over the
+  game; the **Multiplayer** item on the main menu is a see-through window the program draws (`client/menu.py`). The
+  page uses the Inter font (SIL Open Font License, `client/page/fonts/OFL.txt`).
 
 ## Build from source
 
@@ -182,7 +209,8 @@ Python 3.10+ on Windows.
 - Run it: `python client/launcher.py`
 - Build the exe and the release zip: `python tools/build_release.py` (the first run sets up `build/venv` with
   PyInstaller)
-- Server tests: `python server/test_server.py`
+- Tests: `python server/test_server.py`, `python tools/test_servers_page.py` (servers page, two servers and a
+  program), and the other `tools/test_*.py`
 - Rehearse with a fake second player in your own game: `python tools/fake_player.py --help`
 
 ## Status

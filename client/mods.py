@@ -109,6 +109,11 @@ def fingerprint(mod: dict) -> frozenset:
     return frozenset((f["p"], f["h"]) for f in mod["files"] if f["p"] != MANIFEST)
 
 
+def fp(mod: dict) -> str:
+    """fingerprint() as a short text: what a server's info gives for each of its mods (the server's mod_fp)."""
+    return hashlib.sha256("\n".join(sorted(f"{p}:{h}" for p, h in fingerprint(mod))).encode()).hexdigest()[:16]
+
+
 def missing(modset: list[dict], local: list[dict]) -> list[dict]:
     """The mods of the set this PC doesn't have exactly (absent, disabled, or a different version)."""
     have = {m["id"]: fingerprint(m) for m in local if m.get("enabled", True)}

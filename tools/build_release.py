@@ -38,6 +38,8 @@ def pyinstaller() -> Path:
         subprocess.run([sys.executable, "-m", "venv", str(BUILD / "venv")], check=True)
         subprocess.run([str(VENV_PY), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "pyinstaller"],
                        check=True)
+    # Pillow draws the "Multiplayer" item on the game's main menu (client/menu.py)
+    subprocess.run([str(VENV_PY), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "pillow"], check=True)
     return VENV_PY
 
 
@@ -161,6 +163,7 @@ def build_exe(version: str) -> Path:
         "--paths", str(ROOT / "client"), "--paths", str(ROOT / "server"),
         "--add-data", f"{stage / 'mod'}{os.pathsep}mod",
         "--add-data", f"{ROOT / 'client' / 'struct_cache.json'}{os.pathsep}.",
+        "--add-data", f"{ROOT / 'client' / 'page'}{os.pathsep}page",       # the servers page, with its font
         "--exclude-module", "tkinter", "--exclude-module", "unittest", "--exclude-module", "pydoc",
         "--distpath", str(BUILD / "exe"), "--workpath", str(BUILD / "pyinstaller"), "--specpath", str(BUILD),
         str(ROOT / "client" / "launcher.py")], check=True)

@@ -174,6 +174,10 @@
             showNotice(r ? (r.error || 'Saved - reconnecting...') : NOT_RUNNING);
         });
     });
+    $('servers-btn').addEventListener('click', function (e) {
+        e.stopPropagation();                         // not a title-bar click (that restores a minimized panel)
+        post('/page/open', {}, function (r) { showNotice(r ? r.error : NOT_RUNNING); });
+    });
     $('s-sync').addEventListener('click', function () {
         var on = $('s-sync').className.indexOf(' on') < 0;
         $('s-sync').className = 'toggle' + (on ? ' on' : '');

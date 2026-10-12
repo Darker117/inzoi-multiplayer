@@ -14,6 +14,7 @@ class Fake:
     def __init__(self, port, name, key=None, password=""):
         self.port, self.name, self.password = port, name, password
         self.key = key or secrets.token_urlsafe(24)
+        self.skip_others = False
 
     async def connect(self):
         self.r, self.w = await asyncio.open_connection("127.0.0.1", self.port, limit=mp.MAX_LINE)
@@ -31,7 +32,7 @@ class Fake:
             msg = json.loads(line)
             if msg["t"] in types:
                 return msg
-            assert msg["t"] == "ping", f"{self.name}: expected {types}, got {msg}"
+            assert msg["t"] == "ping" or self.skip_others, f"{self.name}: expected {types}, got {msg}"
 
 
 async def run():
@@ -98,7 +99,116 @@ async def run():
     await mods_shared()
     await mods_hosted()
     await shared_world()
+    await servers_page()
     print("all server tests passed")
+
+
+async def answer(player, ref):
+    while True:
+        m = await player.expect("admin")
+        if m.get("ref") == ref:
+            return m
+
+
+async def ask(port, msg, reply):
+    return await mp.request(f"127.0.0.1:{port}", msg, reply)
+
+
+async def servers_page():
+    """What the servers page needs: info before joining, the admin console (code, settings, kick, ban), the public list
+    kept by a directory, and going back to an older world version."""
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as tmp2:
+        pi = mp.Server(mp.Store(Path(tmp)), name="Nox", directory=True, password="pw")
+        srv = await asyncio.start_server(pi.handle, "127.0.0.1", 0, limit=mp.MAX_LINE)
+        port = pi.port = srv.sockets[0].getsockname()[1]
+        info = await ask(port, {"t": "info"}, "info")
+        assert info["name"] == "Nox" and info["password"] is True and info["players"] == 0 and info["directory"]
+        a, b = Fake(port, "Ana", password="pw"), Fake(port, "Ben", password="pw")
+        wa = await a.connect()
+        a.skip_others = True                                              # the admin: only answers matter
+        assert wa["admin"] is False and wa["server"]["id"] == info["id"]
+        wb = await b.connect()
+        b.skip_others = True
+        pak = b"MODDATA"
+        await b.send({"t": "mods", "mods": [{"id": "Top", "name": "Top", "files": [{"p": "t.pak", "h": sha(pak), "s": 7}]}]})
+        await a.expect("modset")
+        info = await ask(port, {"t": "info"}, "info")
+        assert info["players"] == 2 and sorted(info["names"]) == ["Ana", "Ben"]
+        assert info["mods"]["list"][0]["fp"] == mp.mod_fp({"files": [{"p": "t.pak", "h": sha(pak), "s": 7}]})
+
+        # Admin: not until the admin code; then settings, say, kick, ban, unban.
+        await a.send({"t": "admin", "op": "status", "ref": 1})
+        assert "not an admin" in (await answer(a, 1))["error"]
+        await a.send({"t": "admin_claim", "code": "nope", "ref": 2})
+        assert (await answer(a, 2))["ok"] is False
+        await a.send({"t": "admin_claim", "code": pi.store.settings["admin_code"], "ref": 3})
+        assert (await answer(a, 3))["ok"] is True
+        await a.send({"t": "admin", "op": "status", "ref": 4})
+        st = await answer(a, 4)
+        assert st["ref"] == 4 and {p["name"] for p in st["players"]} == {"Ana", "Ben"} and st["admins"][0]["name"] == "Ana"
+        await a.send({"t": "admin", "op": "set", "ref": 5, "name": "Nox's world", "motd": "hi all", "max_players": 8})
+        assert sorted((await answer(a, 5))["changed"]) == ["max_players", "motd", "name"]
+        assert (await b.expect("server_info"))["server"]["name"] == "Nox's world"
+        await a.send({"t": "admin", "op": "say", "ref": 6, "text": "restart soon"})
+        assert (await b.expect("chat"))["name"] == "Server"
+        await a.send({"t": "admin", "op": "kick", "ref": 7, "id": wb["id"], "reason": "test"})
+        assert "kicked by Ana" in (await b.expect("kicked"))["reason"]
+        assert (await answer(a, 7))["ok"] is True
+        b2 = Fake(port, "Ben", key=b.key, password="pw")
+        assert (await b2.connect())["t"] == "welcome"                 # kicked, not banned: can come back
+        await a.send({"t": "admin", "op": "ban", "ref": 8, "id": wb["id"], "reason": "griefing"})
+        assert (await answer(a, 8))["ok"] is True
+        assert (await b2.expect("kicked"))["reason"].startswith("banned")
+        b3 = Fake(port, "Ben", key=b.key, password="pw")
+        assert "banned" in (await b3.connect())["error"]
+        await a.send({"t": "admin", "op": "unban", "ref": 9, "id": wb["id"]})
+        await answer(a, 9)
+        b4 = Fake(port, "Ben", key=b.key, password="pw")
+        b4.skip_others = True
+        assert (await b4.connect())["t"] == "welcome"
+        await a.send({"t": "admin", "op": "restart", "ref": 10})
+        assert "restart that program" in (await answer(a, 10))["error"]   # not a stand-alone server here
+        assert (await ask(port, {"t": "make_admin", "who": "Ben"}, "ok"))["ok"] is True
+        assert wb["id"] in pi.store.settings["admins"]
+
+        # The public list: a friend's server goes public, the directory checks it and lists it.
+        friend = mp.Server(mp.Store(Path(tmp2)), name="Ana's place")
+        fsrv = await asyncio.start_server(friend.handle, "127.0.0.1", 0, limit=mp.MAX_LINE)
+        friend.port = fsrv.sockets[0].getsockname()[1]
+        friend.store.settings.update(public=True, directories=[f"127.0.0.1:{port}"])
+        task = asyncio.ensure_future(friend.announcer())
+        for _ in range(50):
+            if friend.public_status:
+                break
+            await asyncio.sleep(0.1)
+        status = next(iter(friend.public_status.values()))
+        assert status["ok"] and status["reachable"], status
+        listed = (await ask(port, {"t": "dir_list"}, "dir_list"))["servers"]
+        assert [s["name"] for s in listed] == ["Ana's place"] and listed[0]["address"].endswith(f":{friend.port}")
+        assert "secret" not in listed[0]
+        fake = {**friend.listing(), "secret": "x" * 32}                     # someone else claiming that id
+        assert (await ask(port, fake, "dir_announce"))["ok"] is False
+        await ask(port, {"t": "dir_remove", "id": friend.store.settings["id"], "secret": "x" * 32}, "dir_remove")
+        assert len((await ask(port, {"t": "dir_list"}, "dir_list"))["servers"]) == 1
+        await friend.unlist()                                               # going private
+        assert (await ask(port, {"t": "dir_list"}, "dir_list"))["servers"] == []
+        task.cancel()
+
+        # World history: two versions, then back to the first (as version 3).
+        for n, data in ((1, b"WORLD-ONE"), (2, b"WORLD-TWO")):
+            pi.store.blob(sha(data)).write_bytes(data)
+            pi.store.set_world_save({"version": n, "by": "Ana", "time": n, "name": "w", "size": len(data),
+                                     "files": [{"p": "world.usvx", "h": sha(data), "s": len(data)}]})
+        await a.send({"t": "admin", "op": "world_restore", "ref": 11, "version": 1})
+        assert (await answer(a, 11))["version"] == 3
+        ws = await b4.expect("world_save")
+        assert ws["version"] == 3 and ws["files"][0]["h"] == sha(b"WORLD-ONE")
+        assert [m["version"] for m in pi.store.world_history()] == [3, 2, 1]
+        for x in (a, b4):
+            x.w.close()
+        for s in (srv, fsrv):
+            s.close()
+            await s.wait_closed()
 
 
 async def shared_world():

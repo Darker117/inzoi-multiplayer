@@ -36,6 +36,10 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
     color: #fff; border-radius: 6px; padding: 1px 8px;
     user-select: none; -webkit-user-select: none; }
 #minimize-btn:hover { background: rgba(255, 255, 255, 0.16); }
+#servers-btn { cursor: pointer; font-size: 13px; font-weight: bold; line-height: 1.6; padding: 1px 9px; border-radius: 6px;
+               background: rgba(90, 168, 240, 0.25); border: 1px solid rgba(90, 168, 240, 0.6); color: #dcefff;
+               user-select: none; -webkit-user-select: none; }
+#servers-btn:hover { background: rgba(90, 168, 240, 0.45); }
 #close-btn:hover    { background: rgba(200, 60, 60, 0.5); }
 #minimize-btn { display: inline-block; }
 #content { flex: 1; min-height: 0; padding: 12px 14px 14px; overflow: hidden; display: flex; flex-direction: column; }
@@ -117,6 +121,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
   <div id="title-bar">
     <span id="title-text"><span class="dot"></span><span id="title-label">inZOI Multiplayer</span></span>
     <div id="title-buttons">
+      <span id="servers-btn" title="Servers: join one, host your own, admin console">Servers</span>
       <span id="minimize-btn">_</span>
       <span id="close-btn">X</span>
     </div>

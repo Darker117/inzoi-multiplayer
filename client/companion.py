@@ -33,6 +33,7 @@ import houses  # noqa: E402
 import install  # noqa: E402
 import mods  # noqa: E402
 import saves  # noqa: E402
+import servers  # noqa: E402
 import updater  # noqa: E402
 import webui  # noqa: E402
 import world  # noqa: E402
@@ -43,11 +44,12 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.5.2"
+VERSION = "0.6.0"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+SERVER_DATA = CONFIG_DIR / "server"         # a server hosted by this program keeps its data here
 
 log = logging.getLogger("companion")
 
@@ -190,9 +192,10 @@ class Remote:
         self.outfit = None
 
 
-class Companion:
+class Companion(servers.Servers):
     def __init__(self, cfg: dict):
         self.cfg = cfg
+        self.version = VERSION
         self.game = Game()
         self.registry = Registry(self.game.lookup)
         self.mail = Mailbox(install.MAILBOX_DIR)
@@ -243,6 +246,7 @@ class Companion:
         self.world_waiters = {}      # reply type -> future (world_save_offer / world_save_put)
         self.world_hashes = mods.Hashes(CONFIG_DIR / "world_hashes.json")
         self.world_asked = False     # offered to make my multiplayer save the shared world (once per run)
+        self.servers_init(SERVER_DATA, CONFIG_DIR / "page-browser")
         install.MAILBOX_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ helpers
@@ -250,11 +254,14 @@ class Companion:
         """Run a (blocking) game call off the event loop."""
         return await asyncio.to_thread(fn, *a, **kw)
 
+    def save_cfg(self):
+        save_config(self.cfg)
+
     def address(self) -> tuple[str, int, str]:
-        """Where to connect: the server in this same program when hosting, else the one in the settings."""
-        if self.hosting:
+        """Where to connect: the server in this same program when hosting (and playing there), else the one picked."""
+        if self.hosting and self.play_local:
             return "127.0.0.1", self.hosting[0], self.hosting[1]
-        return self.cfg["server"], int(self.cfg["port"]), self.cfg["password"]
+        return self.cfg.get("server") or "", int(self.cfg.get("port") or 24242), self.cfg.get("password", "")
 
     async def send(self, msg: dict):
         if self.writer:
@@ -270,28 +277,38 @@ class Companion:
     # ------------------------------------------------------------------ server connection
     async def run(self):
         try:
-            await webui.serve(self.ui_routes())
+            await webui.serve(self.ui_routes(), webui.page_files())
         except OSError:
             raise SystemExit("inZOI Multiplayer is already running in another window. Use that one "
                              "(or close it first).") from None
-        asyncio.create_task(self.game_loop())
-        asyncio.create_task(self.mailbox_loop())
-        asyncio.create_task(self.mods_loop())
-        asyncio.create_task(self.update_loop())
+        for loop in (self.game_loop, self.mailbox_loop, self.mods_loop, self.update_loop, self.menu_loop,
+                     self.directory_loop):
+            asyncio.create_task(loop())
         backoff = 2
         while True:
+            self.wake.clear()
+            if not self.address()[0]:
+                self.connect_block = self.connect_block or "Not on a server yet: pick one on the servers page."
+            if self.connect_block:                       # (wrong password, banned...): wait until something changes
+                log.info("not connecting: %s", self.connect_block)
+                await self.wake.wait()
+                continue
             try:
                 await self.session()
                 backoff = 2
             except (OSError, asyncio.IncompleteReadError, ConnectionError) as e:
-                log.warning("server connection lost: %s", e)
-                self.notice = f"Can't reach the server ({self.address()[0]}): retrying"
+                if not self.wake.is_set():
+                    log.warning("server connection lost: %s", e)
+                    self.notice = f"Can't reach the server ({self.address()[0]}): retrying"
             self.writer, self.me_id = None, None
             for r in list(self.remotes.values()):
                 self.drop_remote(r)
             self.remotes.clear()
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30)
+            try:
+                await asyncio.wait_for(self.wake.wait(), backoff)
+                backoff = 2                              # another server was picked: go now
+            except asyncio.TimeoutError:
+                backoff = min(backoff * 2, 30)
 
     async def session(self):
         host, port, password = self.address()
@@ -300,7 +317,7 @@ class Companion:
         self.connected_at = time.time()
         self.sent_profile = None
         await self.send({"t": "hello", "protocol": PROTOCOL, "key": self.cfg["key"], "name": self.cfg["name"],
-                         "password": password, "host": bool(self.hosting)})
+                         "password": password, "host": bool(self.hosting and self.play_local)})
         while True:
             line = await reader.readline()
             if not line:
@@ -321,7 +338,12 @@ class Companion:
             self.modset = m.get("modset")
             self.check_mods()
             self.world_meta = m.get("world_save")
+            self.adopt_server(m.get("server"), m.get("admin"))
             self.check_world()
+        elif t == "server_info":
+            self.adopt_server(m.get("server"), m.get("admin"))
+        elif t == "admin":
+            self.on_admin_answer(m)
         elif t == "world_save":
             self.world_meta = {k: v for k, v in m.items() if k != "t"}
             self.system_line(f"{m.get('by') or 'Someone'} saved the shared world")
@@ -372,10 +394,16 @@ class Companion:
             await self.send({"t": "pong"})
         elif t == "kicked":
             log.warning("kicked: %s", m.get("reason"))
+            if m.get("by_admin"):
+                self.notice = f"You were {m.get('reason')}"
+                self.system_line(self.notice)
         elif t == "error":
             log.error("server: %s", m.get("error"))
             self.notice = f"Server: {m.get('error')}"
             if m.get("fatal"):
+                err = str(m.get("error"))
+                if m.get("banned") or "password" in err or "version mismatch" in err:
+                    self.connect_block = f"{self.joining or self.address()[0]}: {err}"      # retrying won't help
                 raise ConnectionError(m.get("error"))
 
     # ------------------------------------------------------------------ chat
@@ -1403,7 +1431,8 @@ class Companion:
                                 "away": bool(st and st.get("city") != self.my_city),
                                 "doing": act.get("bag", "")})
             return {"version": VERSION, "connected": bool(self.writer and self.me_id),
-                    "server": "this PC" if self.hosting else self.cfg["server"],
+                    "server": "this PC" if self.hosting and self.play_local else (self.server_info or {}).get("name")
+                    or self.cfg.get("server") or "no server",
                     "name": self.cfg["name"], "mod": self.mod["state"], "notice": self.notice,
                     "paused": self.world in ("paused", "stopped"), "port": self.address()[1],
                     "host": self.leader == self.me_id, "sync_time": bool(self.cfg.get("sync_time", True)),
@@ -1433,7 +1462,7 @@ class Companion:
 
         async def settings(body):
             changed = False
-            if self.hosting:                     # the panel shows "this PC": keep the friend's server for next time
+            if self.hosting and self.play_local:  # the panel shows "this PC": keep the friend's server for next time
                 body = {k: v for k, v in body.items() if k not in ("server", "port", "password")}
             for k in ("name", "server", "password"):
                 if k in body and str(body[k]).strip() and body[k] != self.cfg.get(k):
@@ -1448,9 +1477,11 @@ class Companion:
                 self.cfg["port"] = int(body["port"])
             if changed:
                 save_config(self.cfg)
-                if self.writer:
-                    self.writer.close()          # reconnect with the new settings
-            return {"ok": True, "name": self.cfg["name"], "server": "this PC" if self.hosting else self.cfg["server"],
+                if self.cfg.get("server"):
+                    self.remember(servers.address_text(self.cfg["server"], self.cfg["port"]), self.cfg["password"])
+                self.switch_server()             # reconnect with the new settings
+            return {"ok": True, "name": self.cfg["name"],
+                    "server": "this PC" if self.hosting and self.play_local else self.cfg.get("server"),
                     "port": self.address()[1], "sync_time": bool(self.cfg.get("sync_time", True))}
 
         async def house_list(_):
@@ -1507,7 +1538,7 @@ class Companion:
 
         return {"/status": status, "/chat": chat, "/join": join, "/settings": settings,
                 "/houses": house_list, "/share": share, "/add_house": add_house, "/mods": mods_answer,
-                "/save": save_answer, "/update": update_answer, "/world": world_answer}
+                "/save": save_answer, "/update": update_answer, "/world": world_answer, **self.server_routes()}
 
 
 def setup_logging(verbose: bool):
@@ -1553,11 +1584,11 @@ def main():
     cfg = load_config(args)
     log.info("inZOI Multiplayer %s - server %s:%s, your name %s", VERSION, cfg["server"], cfg["port"], cfg["name"])
     comp = Companion(cfg)
-    on_console_close(comp.despawn_all)
+    on_console_close(comp.shutdown)
     try:
         asyncio.run(comp.run())
     except KeyboardInterrupt:
-        comp.despawn_all()
+        comp.shutdown()
         time.sleep(0.5)
 
 

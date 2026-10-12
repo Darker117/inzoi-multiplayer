@@ -6,7 +6,7 @@ TCP, one JSON object per line (UTF-8, `\n`-terminated). Every message has `t` (i
 
 Client → `{"t":"hello","protocol":1,"key":"<16-128 chars, generated once per player and kept secret>","name":"Ana","password":"","host":false}`
 
-Server → `{"t":"welcome","id":"p1a2b3c4","leader":"<player id>","host":"<player id>"|null,"world":{...}|null,"players":[Player...],"houses":[HouseMeta...],"modset":ModSet,"motd":""}`
+Server → `{"t":"welcome","id":"p1a2b3c4","leader":"<player id>","host":"<player id>"|null,"world":{...}|null,"players":[Player...],"houses":[HouseMeta...],"modset":ModSet,"motd":"","server":{id,name,description,motd,public,password,max_players,version,hosted,directory},"admin":false}`
 or `{"t":"error","fatal":true,"error":"..."}` and the connection closes.
 
 `host: true` counts only on a server started inside a player's program ("Host and play", `Server(hosted=True)`) and only
@@ -48,11 +48,39 @@ Version and PackageTime, its folder under Documents/inZOI/Mods, and each file's 
 `ModSet` = `{source: "host"|"everyone", host, mods: [Mod + by: [names]]}`: hosted, the host's mods; otherwise everyone's
 pooled (the newest build of a mod wins).
 
+## Before joining: info and the public list (no hello needed)
+
+| `t` | answer |
+|---|---|
+| `info` | `info {id, name, description, motd, public, password (bool), max_players, players, names, host, hosted, version, protocol, directory, uptime, world, mods: {source, list: [{id, name, version, built, size, fp}]}}`: what the servers page shows and checks before joining. `fp` is a short fingerprint of a mod's files (not its mod_manifest.json), equal when two PCs have the very same mod. |
+| `dir_announce` | to a server started with `--directory`: `{id, secret, port, address?, name, description, players, max_players, password, version, protocol, mods_count, names, world}`. The directory checks the server answers `info` with that id at `address` (default: the announcer's IP and `port`), lists it, and answers `dir_announce {ok, address, reachable, error}`. A public server announces every 60 s; a listing goes after 180 s of silence. The `secret` (kept in server.json) stops anyone else from taking over or removing the listing. |
+| `dir_remove` | `{id, secret}`: unlist (the server went private). |
+| `dir_list` | `dir_list {servers: [{id, name, address, ...}]}`: the listed servers that can be reached. A server on the directory's own machine is given at the address the asker used. |
+
+## Admin console
+
+The server's admins (data/server.json `admins`; the host of a "Host and play" server always is one) send
+`{"t":"admin","op":...,"ref":n,...}` and get `{"t":"admin","ref":n,"op":...,"ok":true|false,"error"?,...}`:
+
+| `op` | fields | |
+|---|---|---|
+| `status` | | settings, admin code, players online (with IP), everyone who has joined, bans, admins, world and its earlier versions, mods, public listing status, recent log lines |
+| `set` | `name, description, motd, password, max_players, public, public_address, directories` (any) | saved; everyone gets `server_info {server}`; going public/private (un)lists it |
+| `kick` / `ban` | `id, reason?` | the player gets `kicked {reason, by_admin}`; a banned player's hello gets `error {fatal, banned}` |
+| `unban`, `admin_add`, `admin_remove` | `id` (admin_add also takes a name) | |
+| `say` | `text` | a chat line from "Server" |
+| `restart` | `in` (seconds) | stand-alone servers only: everyone saves (`restart_soon`), then the server exits with code 75 for systemd to start it again |
+| `world_restore` | `version` | an earlier world version becomes the current one again (as a new version) |
+
+`{"t":"admin_claim","code":"...","ref":n}` makes the sender an admin if the code is the server's admin code (printed by
+`inzoi_mp_server.py --admin-code` on the server's machine, and shown to admins in their console).
+From the server's own machine (127.0.0.1), before hello: `{"t":"make_admin","who":"<name or id>"}` (`--make-admin`).
+
 ## Server → client
 
 `welcome`, `joined {player}`, `left {id,name}`, `leader {id}`, `state {id,state}`, `profile {id,profile}`,
 `world {world}`, `modset {source,host,mods}`, `chat {id,name,text,time}`, `event {from,kind,data}`, `house_updated {meta}`, `house`, `house_list`,
-`who`, `ping`, `pong`, `kicked {reason}`, `error {error, fatal?}`.
+`who`, `ping`, `pong`, `kicked {reason, by_admin?}`, `error {error, fatal?, banned?}`, `server_info {server, admin?}`, `admin {ref, op, ok, ...}`.
 
 ## What the companion puts in messages (the server relays them as-is)
 
