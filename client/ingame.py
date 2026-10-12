@@ -78,15 +78,21 @@ class InGame:
         self.rev = 0
         self.written = None
         self.alive_at = 0.0
+        self.offered = set()                                  # updates the page has offered once already
         self.wake = asyncio.Event()
 
     # ------------------------------------------------------------------ files
+    def game_info(self) -> dict:
+        """What the UE4SS script said last (game.json): {alive, version, menu, page}, if it's running right now."""
+        try:
+            info = json.loads((self.dir / "game.json").read_text("utf-8"))
+            return info if time.time() - float(info.get("alive", 0)) < 5 else {}
+        except (OSError, ValueError, TypeError, AttributeError):
+            return {}
+
     def game_running(self) -> bool:
         """The UE4SS script is running in the game right now (then the program draws no overlay item)."""
-        try:
-            return time.time() - float(json.loads((self.dir / "game.json").read_text("utf-8")).get("alive", 0)) < 5
-        except (OSError, ValueError, TypeError, AttributeError):
-            return False
+        return bool(self.game_info())
 
     def _write(self, name: str, data: dict):
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -125,6 +131,8 @@ class InGame:
                 p.unlink()
             except OSError:
                 pass
+        if self.game_info().get("page"):                      # the page stayed open while the program restarted
+            self.open = True                                   # (an update): carry on drawing it
         while True:
             try:
                 self.heartbeat(version)
@@ -169,6 +177,10 @@ class InGame:
         if t == "open":
             self.open, self.modal = True, None
             await self.refresh()
+            u = (self.state or {}).get("update") or {}
+            if u.get("state") == "available" and u.get("version") not in self.offered:
+                self.offered.add(u["version"])
+                self.modal = self.update_dialog(u)              # a new version: say so as the page opens
             self.publish()                                      # ready before the page is built
             await self.open_mods()
         elif t == "opened":
@@ -458,13 +470,20 @@ class InGame:
         else:
             empty = "No saved servers yet. Add one with its address (the friend who hosts gives it to you), or host your own."
         pills = []
+        u = s.get("update") or {}
+        if u.get("state"):
+            pct = int(100 * (u.get("done") or 0) / max(1, u.get("total") or 1))
+            label = {"downloading": f"Updating... {pct}%", "restarting": "Restarting..."}.get(
+                u["state"], f"Update to {u.get('version')}")
+            pills.append({"id": "update", "text": label, "icon": "download"})
         if self.tab == "private":
             pills.append({"id": "add", "text": "Add Server", "icon": "plus"})
             if not s.get("hosting"):
                 pills.append({"id": "host", "text": "Host a Server", "icon": "home"})
+        pills.append({"id": "name", "text": "Your Name", "icon": "person"})
         where = (s.get("server") or {}).get("name") or s.get("current") if s.get("connected") else None
         footer = (f"Online on {where} as {s.get('name')}" if where else (s.get("error") or "Not connected")) + \
-            f"   ·   inZOI Multiplayer {s.get('version') or ''}"
+            f"   ·   inZOI Multiplayer {s.get('version') or ''}" +             (f" ({u['version']} is out)" if u.get("state") in ("available", "later", "error") else "")
         filters = []
         for i, (label, opts) in enumerate(FILTERS):
             value = dict(opts).get(self.filters[i], opts[0][1])
@@ -477,7 +496,8 @@ class InGame:
             "rows": [self.row_view(r, i) for i, r in enumerate(rows)], "empty": empty,
             "details": self.details_view(sel),
             "details_empty": "You can view details by selecting a server from the list on the left.",
-            "side": self.side_view(sel), "footer": footer, "footer_icon": "info", "dialog": self.modal,
+            "side": self.side_view(sel), "footer": footer, "footer_icon": "info",
+            "dialog": self.updating_dialog() if (self.modal or {}).get("id") == "updating" else self.modal,
         }
 
     # ------------------------------------------------------------------ buttons
@@ -500,14 +520,27 @@ class InGame:
         elif what == "host":
             s = self.state or {}
             self.modal = {"id": "host", "title": "Host a Server",
-                          "desc": "Your server runs in this program while it's open, and you play on it too. "
-                                  "Everyone who joins gets your mods.",
+                          "desc": "Your server runs while you play, and comes back each time you start inZOI "
+                                  "Multiplayer. You play on it too, and everyone who joins gets your mods.",
                           "fields": [{"id": "name", "label": "Server name", "value": (s.get("name") or "My") + "'s server"},
                                      {"id": "password", "label": "Password (optional)", "value": "", "secret": True},
                                      {"id": "max_players", "label": "Max players", "value": "16"}],
                           "toggles": [{"id": "public", "label": "Public server: listed for everyone", "on": False}],
                           "buttons": [{"id": "cancel", "text": "Cancel", "style": "line"},
                                       {"id": "start", "text": "Start Hosting", "style": "fill"}]}
+        elif what == "update":
+            u = (self.state or {}).get("update") or {}
+            if u.get("state") in ("downloading", "restarting"):
+                self.modal = {"id": "updating"}
+            elif u.get("state"):
+                self.modal = self.update_dialog(u)
+        elif what == "name":
+            s = self.state or {}
+            self.modal = {"id": "name", "title": "Your Name",
+                          "desc": "Friends see this name over your Zoi and in the chat.",
+                          "fields": [{"id": "name", "label": "Your name", "value": s.get("name") or ""}],
+                          "buttons": [{"id": "cancel", "text": "Cancel", "style": "line"},
+                                      {"id": "save", "text": "Save", "style": "fill"}]}
         elif what == "check_all":
             for a in list(self.checked):
                 loop.create_task(self.check(a, quiet=True))
@@ -554,6 +587,29 @@ class InGame:
                               "buttons": [{"id": "cancel", "text": "Cancel", "style": "line"},
                                           {"id": "claim", "text": "Become Admin", "style": "fill"}]}
         self.wake.set()
+
+    @staticmethod
+    def update_dialog(u):
+        return {"id": "update", "version": u.get("version"), "title": "Update Available", "desc": u.get("text") or "",
+                "buttons": [{"id": "later", "text": "Later", "style": "line"},
+                            {"id": "now", "text": "Update Now", "style": "fill"}]}
+
+    def updating_dialog(self):
+        """The update in progress, live: the download, then the restart (or what went wrong)."""
+        u = (self.state or {}).get("update") or {}
+        if u.get("state") == "error":
+            return {"id": "update", "version": u.get("version"), "title": "The Update Didn't Work",
+                    "desc": f"{u.get('error') or 'Something went wrong.'} Your version keeps working.",
+                    "buttons": [{"id": "later", "text": "Later", "style": "line"},
+                                {"id": "retry", "text": "Try Again", "style": "fill"}]}
+        if u.get("state") == "restarting" or (u.get("total") and u.get("done") == u.get("total")):
+            desc = ("Restarting inZOI Multiplayer with the new version. Your game keeps running; this page comes "
+                    "back in a moment.")
+        else:
+            done, total = u.get("done") or 0, u.get("total") or 0
+            desc = (f"Downloading inZOI Multiplayer {u.get('version') or ''}... {int(100 * done / max(1, total))}%"
+                    f"  ({mb(done)} of {mb(total)})")
+        return {"id": "updating", "title": "Updating", "desc": desc, "buttons": []}
 
     def server_dialog(self, r, adding=False):
         editing = r is not None and not adding
@@ -624,6 +680,8 @@ class InGame:
 
     async def dialog_answer(self, button, fields):
         m = self.modal or {}
+        if m.get("id") == "updating":
+            m = self.updating_dialog()                          # (what the page shows: maybe what went wrong)
         self.modal = None
         kind = m.get("id")
         if button in (None, "cancel", "close") or (button == "back" and not kind.startswith("c_")):
@@ -647,6 +705,19 @@ class InGame:
             await self.refresh()
             if button == "save_join" and row:
                 await self.join(row)
+        elif kind == "update" and button in ("now", "retry"):
+            await self.api("/update", {"key": m.get("version"), "action": "update"})
+            self.modal = {"id": "updating", "version": m.get("version")}
+        elif kind == "update" and button == "later":
+            await self.api("/update", {"key": m.get("version"), "action": "later"})
+        elif kind == "name" and button == "save":
+            name = " ".join(str(fields.get("name") or "").split())[:32]
+            if not name:
+                m["error"] = "Type a name."
+                self.modal = m
+                return
+            await self.api("/settings", {"name": name})
+            self.say(f"Friends see you as {name} now.")
         elif kind == "password" and button == "join":
             await self.do_join(m["address"], str(fields.get("password") or ""), m.get("name"))
         elif kind == "remove" and button == "remove":

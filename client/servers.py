@@ -558,7 +558,7 @@ class Servers:
                     "saved": saved, "public": self.public["list"], "public_errors": self.public["errors"],
                     "public_at": self.public["at"], "directories": self.directories(),
                     "hosting": self.hosting_state(), "mods": self.mods_status(), "in_game": self.world != "out",
-                    "save": self.mp_name() if self.cfg.get("mp_save") else None}
+                    "save": self.mp_name() if self.cfg.get("mp_save") else None, "update": self.update_view()}
 
         async def check(body):
             entry = self.saved_entry(body.get("address", ""))

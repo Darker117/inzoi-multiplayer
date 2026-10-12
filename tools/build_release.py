@@ -190,7 +190,7 @@ def build_exe(version: str) -> Path:
     vfile.write_text(VERSION_INFO.replace("@T@", nums).replace("@V@", version), "utf-8")
     subprocess.run([
         str(pyinstaller()), "-m", "PyInstaller", "--noconfirm", "--clean", "--log-level", "WARN",
-        "--onefile", "--console", "--name", EXE_NAME, "--icon", str(icon), "--version-file", str(vfile),
+        "--onefile", "--windowed", "--name", EXE_NAME, "--icon", str(icon), "--version-file", str(vfile),
         "--paths", str(ROOT / "client"), "--paths", str(ROOT / "server"),
         "--add-data", f"{stage / 'mod'}{os.pathsep}mod",
         "--add-data", f"{ROOT / 'client' / 'struct_cache.json'}{os.pathsep}.",

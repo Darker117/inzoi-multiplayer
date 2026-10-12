@@ -1,24 +1,24 @@
-"""inZOI Multiplayer, all in one program: play with friends, host the server for them, or both.
-
-Double-click "inZOI Multiplayer.exe" (or run this file) and pick:
-    1  Play            join a friend's server
-    2  Host and play   run the server on this PC and play on it; friends connect to you
-    3  Host only       just run the server (no game needed), e.g. on a PC that stays on
-The choice is remembered and is the default next time (just press Enter).
+"""inZOI Multiplayer, all in one program. Double-click "inZOI Multiplayer.exe": inZOI starts, with Multiplayer on its
+main menu. The program has no window of its own: the servers, joining, hosting, your name and the admin console are
+all on the game's Multiplayer page, and the program closes by itself once inZOI has closed.
 
     python client/launcher.py [--play | --host | --host-only] [--server ADDR] [--port N] [--password X]
-                              [--name NAME] [--motd TEXT] [-v]
+                              [--name NAME] [--motd TEXT] [--menu-button] [-v]
 
-With --play, --server/--port/--password are the friend's server. With --host/--host-only, --port/--password/--motd
-are your own server's (remembered). tools/build_release.py packages this with the companion, the server and the mod
-into the exe.
+--host also runs a server on this PC (the page's "Host a Server" does the same; it's remembered either way).
+--host-only runs just a server, in a window of its own, on a PC that stays on (no game needed). --menu-button puts the
+main menu's Multiplayer button back after its files were deleted. tools/build_release.py packages this with the
+companion, the server and the mod into the exe.
 """
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import subprocess
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -33,83 +33,126 @@ import ue4ss  # noqa: E402
 import updater  # noqa: E402
 
 log = logging.getLogger("launcher")
-MENU = [("play", "Join a friend", "connect to the server your friend hosts"),
-        ("host", "Host and play", "your friends connect to you, and you play too"),
-        ("host-only", "Host only", "just run the server for your friends (no game needed)")]
 SERVER_DATA = companion.SERVER_DATA
 GAME_URL = "steam://rungameid/2456740"
 GAME_STARTED = False                    # this program already started inZOI (after adding the menu button)
+NEVER_STARTED = 1800                    # inZOI didn't come up this long after the program started: give up
 
 
 def interactive() -> bool:
     return companion.interactive()
 
 
-def server_text(cfg: dict) -> str:
-    port = int(cfg.get("port") or 24242)
-    return (cfg.get("server") or "") + ("" if port == 24242 or not cfg.get("server") else f":{port}")
+def testing() -> bool:
+    """The exe tests: no inZOI started or followed, no message boxes."""
+    return bool(os.environ.get("INZOI_MP_TEST"))
 
 
-def choose_mode(cfg: dict) -> str:
-    """The start menu: one of MENU's modes, or "settings"."""
-    modes = [m for m, _, _ in MENU] + ["settings"]
-    default = modes.index(cfg["mode"]) + 1 if cfg.get("mode") in modes else 1
-    print(f"\n  inZOI Multiplayer {companion.VERSION}\n")
-    for i, (mode, title, what) in enumerate(MENU, 1):
-        if mode == "play" and cfg.get("server"):
-            what += f" ({server_text(cfg)})"
-        print(f"    {i}  {title:<16}{what}")
-    print(f"    4  {'Settings':<16}change your name, the server address or the passwords")
-    while True:
-        pick = companion.ask(f"\n  Type 1, 2, 3 or 4 and press Enter [{default}]: ").strip() or str(default)
-        if pick in ("1", "2", "3", "4"):
-            print()
-            return modes[int(pick) - 1]
+# ---------------------------------------------------------------------------------------------- telling the player
+def message_box(text: str, error: bool = False):
+    import ctypes
+    flags = (0x10 if error else 0x40) | 0x10000 | 0x40000   # MB_ICONERROR / MB_ICONINFORMATION, SETFOREGROUND, TOPMOST
+    ctypes.windll.user32.MessageBoxW(None, text, "inZOI Multiplayer", flags)
 
 
-def edit_settings(cfg: dict):
-    """Menu 4: change what was typed in before. Enter keeps the value shown in [brackets]."""
-    print("  Settings. Press Enter to keep what's in [brackets]. Type none to remove a password.\n")
-    name = companion.ask(f"  Your name [{cfg.get('name') or ''}]: ").strip()
-    if name:
-        cfg["name"] = name
-    print("\n  When you join a friend:")
-    addr = companion.ask(f"  Server address [{server_text(cfg) or 'none'}]: ").strip()
-    if addr:
-        host, _, port = addr.partition(":")
-        cfg["server"], cfg["port"] = host.strip(), int(port) if port.strip().isdigit() else 24242
-    pw = companion.ask(f"  Password of that server [{cfg.get('password') or 'none'}]: ").strip()
-    if pw:
-        cfg["password"] = "" if pw.lower() == "none" else pw
-    print("\n  When you host:")
-    pw = companion.ask(f"  Password for your server [{cfg.get('host_password') or 'none'}]: ").strip()
-    if pw:
-        cfg["host_password"] = "" if pw.lower() == "none" else pw
-    port = companion.ask(f"  Port for your server [{cfg.get('host_port') or 24242}]: ").strip()
-    if port.isdigit():
-        cfg["host_port"] = int(port)
-    if os.name == "nt" and ue4ss.available():
-        on = cfg.get("ingame_menu")
-        print("\n  inZOI's main menu:")
-        ans = companion.ask(f"  Multiplayer button on the main menu (adds UE4SS next to the game) "
-                            f"[{'on' if on else 'off'}] (on/off): ").strip().lower()
-        if ans in ("off", "n", "no") and on:
-            cfg["ingame_menu"] = False
-            binaries = ue4ss.game_binaries(cfg)
-            if binaries and menu.game_window():
-                print("  Close inZOI first, then turn it off here again.")
-                cfg["ingame_menu"] = True
-            elif binaries:
-                ue4ss.uninstall(binaries)
-                print("  Taken out of the game folder.")
-        elif ans in ("on", "y", "yes") and not on:
-            cfg["ingame_menu"] = True
-    companion.save_config(cfg)
-    print("\n  Saved.")
+def windowless() -> bool:
+    """The exe without a window: messages go in message boxes."""
+    return os.name == "nt" and getattr(sys, "frozen", False) and not interactive() and not testing()
 
 
+def notify(text: str, error: bool = False):
+    """Tell the player something, without waiting for them: in the window when there is one, else a message box."""
+    log.log(logging.WARNING if error else logging.INFO, "%s", " ".join(text.split()))
+    if windowless():
+        threading.Thread(target=message_box, args=(text, error), daemon=True).start()
+    else:
+        print("\n  " + text.replace("\n", "\n  ") + "\n")
+
+
+def fail(text: str):
+    """The program can't go on: say why before it closes."""
+    if windowless():
+        message_box(text, error=True)
+    else:
+        print(f"\n  {text}\n")
+        pause()
+
+
+def pause():
+    """A double-clicked exe's window closes the moment it exits: keep it open so the message can be read."""
+    if getattr(sys, "frozen", False) and interactive():
+        try:
+            input("  Press Enter to close this window.")
+        except (EOFError, KeyboardInterrupt, RuntimeError):
+            pass
+
+
+def quiet_streams():
+    """The exe has no window: print() goes nowhere (the log file in %APPDATA%\\inzoi-mp keeps everything)."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")                               # noqa: SIM115 - for the whole run
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")                               # noqa: SIM115
+
+
+def make_console():
+    """Host only runs just a server, so it gets a window for its messages (started from a console, it uses that)."""
+    if os.name != "nt":
+        return
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    if k32.AllocConsole():
+        sys.stdout = open("CONOUT$", "w", buffering=1, encoding="utf-8", errors="replace")    # noqa: SIM115
+        sys.stderr = sys.stdout
+        sys.stdin = open("CONIN$", encoding="utf-8", errors="replace")                         # noqa: SIM115
+    k32.SetConsoleTitleW("inZOI Multiplayer server")
+    # In the classic console a click starts a text selection, and that freezes the program until Esc: turn off
+    # QuickEdit (0x40), keeping ENABLE_EXTENDED_FLAGS (0x80) so the change sticks.
+    stdin, mode = k32.GetStdHandle(-10), ctypes.c_uint()
+    if k32.GetConsoleMode(stdin, ctypes.byref(mode)):
+        k32.SetConsoleMode(stdin, (mode.value & ~0x40) | 0x80)
+
+
+# ---------------------------------------------------------------------------------------------- one copy at a time
+def single_instance(wait: float) -> bool:
+    """Only one copy runs per settings folder. True: this is it. (After an update or a restart the old copy is still
+    closing: wait for it.)"""
+    if os.name != "nt":
+        return True
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    name = "Local\\inZOIMultiplayer-" + hashlib.sha1(str(companion.CONFIG_DIR).lower().encode()).hexdigest()[:12]
+    h = k32.CreateMutexW(None, False, name)
+    if not h:
+        return True
+    single_instance.handle = h                                   # held until the program exits
+    return k32.WaitForSingleObject(ctypes.c_void_p(h), int(wait * 1000)) in (0, 0x80)   # mine, or left by a crash
+
+
+def bring_up_game():
+    """The program is running already (double-clicked again): show inZOI, or start it."""
+    hwnd = menu.game_window() if os.name == "nt" else None
+    if not hwnd:
+        start_game()
+        return
+    import ctypes
+    user32 = ctypes.windll.user32
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)                               # SW_RESTORE
+    user32.SetForegroundWindow(hwnd)
+
+
+def relaunch(args: list[str]):
+    """Start this program again (it waits for this copy to close)."""
+    me = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve())]
+    env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+    subprocess.Popen([*me, *args, "--restarted"], env=env, close_fds=True)
+
+
+# ---------------------------------------------------------------------------------------------- hosting
 def host_settings(cfg: dict, args) -> tuple[int, str, str]:
-    """Your own server's port/password/motd: from the command line, else remembered, else asked once."""
+    """Your own server's port/password/motd: from the command line, else remembered, else asked once (host only)."""
     if args.port:
         cfg["host_port"] = args.port
     if args.password is not None:
@@ -118,8 +161,6 @@ def host_settings(cfg: dict, args) -> tuple[int, str, str]:
         cfg["host_motd"] = args.motd
     if "host_password" not in cfg and interactive():
         cfg["host_password"] = companion.ask("  Pick a password so only your friends can join (or just press Enter for none): ").strip()
-        if cfg["host_password"]:
-            print("  Friends type it in the in-game panel: Settings, Password, then Save.")
         print()
     cfg.setdefault("host_port", 24242)
     cfg.setdefault("host_password", "")
@@ -141,7 +182,25 @@ def show_addresses(port: int, password: str):
         print(f"  them (see the README), or forward port {port} (TCP) to this PC in your router.")
     print(f"\n  Password: {password}" if password else "\n  No password: anyone who can reach this PC can join.")
     print("  If Windows asks whether inZOI Multiplayer may use the network, click Allow.")
-    print("  Keep this window open while friends play.\n")
+    print("  Keep this window open while friends play.")
+    print("  (To play on this PC instead, type play and press Enter.)\n")
+
+
+def watch_console(cfg: dict):
+    """Host only: typing play in its window makes this PC a player again (the program comes back without a window)."""
+    def run():
+        while True:
+            try:
+                line = input()
+            except (EOFError, OSError, RuntimeError):
+                return
+            if line.strip().lower() == "play":
+                cfg["mode"] = "play"
+                companion.save_config(cfg)
+                relaunch(["--play"])
+                logging.shutdown()
+                os._exit(0)
+    threading.Thread(target=run, daemon=True).start()
 
 
 async def fetch_update():
@@ -158,6 +217,24 @@ async def fetch_update():
         await asyncio.sleep(2 * 3600)
 
 
+# ---------------------------------------------------------------------------------------------- running
+async def follow_game() -> str:
+    """The program lives as long as inZOI: returns once inZOI has closed (or never came up)."""
+    if os.name != "nt" or testing():
+        await asyncio.Event().wait()
+    seen, gone, start = False, 0, time.monotonic()
+    while True:
+        await asyncio.sleep(3)
+        if await asyncio.to_thread(menu.game_window):
+            seen, gone = True, 0
+        elif seen:
+            gone += 3
+            if gone >= 30:                                   # (not just a restart of the game)
+                return "inZOI closed"
+        elif time.monotonic() - start > NEVER_STARTED:
+            return "inZOI didn't start"
+
+
 async def run(mode: str, cfg: dict, comp):
     if mode == "host-only":
         args = argparse.Namespace(host="0.0.0.0", port=cfg["host_port"], password=cfg["host_password"],
@@ -169,174 +246,214 @@ async def run(mode: str, cfg: dict, comp):
             raise SystemExit(f"Can't host on port {args.port}: {e.strerror or e}. Is a server already running on "
                              "this PC?") from None
         show_addresses(args.port, hosted[0].mp_server.password)
-    elif mode == "host":
-        try:
-            await comp.start_hosting(play=True)          # host and play: the host's mods are everyone's
-        except ValueError as e:
-            raise SystemExit(str(e)) from None
-        show_addresses(*comp.hosting)
-    if comp:
-        if mode == "play":
-            print(f"\n  Connecting to {server_text(cfg)} as {cfg['name']}.")
-            print("  (Wrong address or name? Change it in the in-game panel's Settings, or close this window, open")
-            print("  the program again and type 4.)")
-        print("  On inZOI's main menu, click Multiplayer to see servers, join one, or host your own.")
-        if cfg.get("mp_save"):
-            print("  Wait at the main menu and your multiplayer save loads by itself.")
-        else:
-            print("  Load the save you want to play with friends (you'll be asked about it).")
-        print("  Keep this window open while you play, and close it when you're done.\n")
-        await comp.run()
-    else:
+        watch_console(cfg)
         asyncio.create_task(fetch_update())
         await asyncio.Event().wait()
+    if mode == "host":
+        try:
+            await comp.start_hosting(play=True)          # host and play: the host's mods are everyone's
+            show_addresses(*comp.hosting)
+        except ValueError as e:
+            log.warning("couldn't start your server: %s", e)
+            comp.notice = f"Couldn't start your server: {e}"
+    main = asyncio.create_task(comp.run())
+    game = asyncio.create_task(follow_game())
+    done, _ = await asyncio.wait({main, game}, return_when=asyncio.FIRST_COMPLETED)
+    if main in done:
+        main.result()                                    # (it couldn't start: SystemExit says why)
+        return
+    log.info("%s: closing", game.result())
+    hosting = cfg.get("mode")
+    if comp.hosted:
+        await comp.stop_hosting()                        # friends hear that the host closed the server
+        cfg["mode"] = hosting                            # and it's back the next time
+        companion.save_config(cfg)
+    comp.shutdown()
 
 
 def main():
     ap = argparse.ArgumentParser(description="inZOI Multiplayer: play together, host a server, or both")
     how = ap.add_mutually_exclusive_group()
-    how.add_argument("--play", dest="mode", action="store_const", const="play", help="join a friend's server")
+    how.add_argument("--play", dest="mode", action="store_const", const="play", help="just play (no server here)")
     how.add_argument("--host", dest="mode", action="store_const", const="host", help="host on this PC and play")
-    how.add_argument("--host-only", dest="mode", action="store_const", const="host-only", help="just host")
-    ap.add_argument("--server", help="the friend's server address (play)")
+    how.add_argument("--host-only", dest="mode", action="store_const", const="host-only",
+                     help="just run a server, in a window (no game needed)")
+    ap.add_argument("--server", help="a friend's server address to join")
     ap.add_argument("--port", type=int, help="the server's port (play: theirs, host: yours)")
     ap.add_argument("--password", help="the server's password (play: theirs, host: yours)")
     ap.add_argument("--name", help="your name, as friends see it")
     ap.add_argument("--motd", help="welcome message for players joining your server (host)")
+    ap.add_argument("--menu-button", action="store_true",
+                    help="put the Multiplayer button back on inZOI's main menu (after its files were deleted)")
+    ap.add_argument("--restarted", action="store_true", help=argparse.SUPPRESS)    # (by an update: wait for the old)
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    if os.name == "nt":
-        import ctypes
-        k32 = ctypes.windll.kernel32
-        k32.SetConsoleTitleW("inZOI Multiplayer")
-        # In the classic console a click starts a text selection, and that freezes the program until Esc: turn off
-        # QuickEdit (0x40), keeping ENABLE_EXTENDED_FLAGS (0x80) so the change sticks.
-        stdin, mode = k32.GetStdHandle(-10), ctypes.c_uint()
-        if k32.GetConsoleMode(stdin, ctypes.byref(mode)):
-            k32.SetConsoleMode(stdin, (mode.value & ~0x40) | 0x80)
+    saved = companion.read_config()
+    mode = args.mode or (saved.get("mode") if saved.get("mode") in ("play", "host", "host-only") else "play")
+    if mode == "host-only":
+        make_console()
+    else:
+        quiet_streams()
     companion.setup_logging(args.verbose)
     updater.clean_old()
+    if not single_instance(20 if args.restarted else 1):
+        log.info("inZOI Multiplayer is running already: bringing inZOI up")
+        if mode != "host-only":
+            bring_up_game()
+        return
     waiting = updater.pending(companion.VERSION) if updater.frozen() else None
-    if waiting and interactive():
-        version = waiting.stem.split("inZOI-Multiplayer-", 1)[1]
-        answer = companion.ask(f"\n  inZOI Multiplayer {version} was downloaded last time. Update now? Type y or n [y]: ")
-        if not answer.strip().lower().startswith("n"):
-            updater.apply(waiting, sys.argv[1:])
+    if waiting:
+        log.info("updating to %s", waiting.stem)
+        try:
+            updater.apply(waiting, [a for a in sys.argv[1:] if a != "--restarted"])
             return
-    saved = companion.read_config()
-    mode = args.mode or (None if interactive() else saved.get("mode", "play"))
-    while not mode:
-        mode = choose_mode(saved)
-        if mode == "settings":
-            edit_settings(saved)
-            mode = None
+        except OSError as e:
+            log.warning("couldn't apply the update: %s", e)
+
     if mode == "host-only":
         cfg = saved                                       # a server needs no player settings
-    else:
-        joining = args if mode == "play" else argparse.Namespace(server=None, port=None, password=None,
-                                                                 name=args.name)
-        cfg = companion.load_config(joining, ask_server=mode == "play")
-    if mode != "play":
         host_settings(cfg, args)
+        cfg["mode"] = mode
+        companion.save_config(cfg)
+        print(f"\n  inZOI Multiplayer {companion.VERSION}: server only")
+        asyncio.run(run(mode, cfg, None))
+        return
+    if not saved.get("name") and not args.name:
+        args.name = ue4ss.steam_name()                    # friends know them by it (else the Windows user name)
+    joining = args if mode == "play" else argparse.Namespace(server=None, port=None, password=None, name=args.name)
+    cfg = companion.load_config(joining, ask_server=False, ask=False)
+    if mode == "host":
+        host_settings(cfg, args)
+    if args.menu_button:
+        cfg["ingame_menu"] = True
+        cfg.pop("ingame_installed", None)
     cfg["mode"] = mode
     companion.save_config(cfg)
 
-    comp = None
-    if mode != "host-only":
-        comp = companion.Companion(cfg)
-        comp.restart_args = [f"--{mode}"]
-        companion.on_console_close(comp.shutdown)
-        where = "your own server (this PC)" if mode == "host" else f"server {cfg['server']}:{cfg['port']}"
-        log.info("inZOI Multiplayer %s - %s, your name %s", companion.VERSION, where, cfg["name"])
-        setup_ingame(cfg)
-        offer_game()
+    comp = companion.Companion(cfg)
+    comp.restart_args = []                               # an update comes back the way the settings say
+    companion.on_console_close(comp.shutdown)
+    where = "hosting on this PC" if mode == "host" else f"server {cfg['server']}" if cfg.get("server") else "no server yet"
+    log.info("inZOI Multiplayer %s - %s, your name %s", companion.VERSION, where, cfg["name"])
+    setup_ingame(cfg)
+    start_game()
     try:
         asyncio.run(run(mode, cfg, comp))
     except KeyboardInterrupt:
-        if comp:
-            comp.shutdown()
-            time.sleep(0.5)
-        log.info("stopped")
+        comp.shutdown()
+        time.sleep(0.5)
+    log.info("stopped")
+
+
+# ---------------------------------------------------------------------------------------------- the game
+def script_running(wait: float = 4) -> bool:
+    """Our script in the running game says it's alive (it writes game.json every second)."""
+    beat = companion.CONFIG_DIR / "ingame" / "game.json"
+    end = time.monotonic() + wait
+    while True:
+        try:
+            if time.time() - float(json.loads(beat.read_text("utf-8")).get("alive", 0)) < 5:
+                return True
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.5)
 
 
 def setup_ingame(cfg: dict):
-    """The real "Multiplayer" item on inZOI's main menu (and the servers page inside the game) come from UE4SS, a
-    script loader next to the game. Installed and kept up to date by itself every start (unless turned off in
-    Settings); the first time, the player is told where it is, and inZOI restarts if it's sitting on its main menu."""
+    """The real "Multiplayer" button on inZOI's main menu (and the servers page inside the game) come from UE4SS, a
+    script loader next to the game. Installed and kept up to date by itself every start; the first time, the player
+    is told where it is and how to take it out, and inZOI restarts if it's sitting on its main menu. Deleting it
+    (as that message says) is respected: it isn't put back."""
     if os.name != "nt" or not ue4ss.available() or cfg.get("ingame_menu") is False:
         return
     binaries = ue4ss.game_binaries(cfg)
     if not binaries:
         log.info("inZOI's folder not found yet: the main menu's Multiplayer button comes once inZOI has run")
         return
-    if cfg.get("game_bin") != str(binaries) or cfg.get("ingame_menu") is None:
-        cfg["game_bin"], cfg["ingame_menu"] = str(binaries), True
+    where = str(binaries)
+    st = ue4ss.state(binaries)
+    if cfg.get("ingame_installed") == where and not (st["ue4ss"] and st["script"]):
+        cfg["ingame_menu"] = False
+        cfg.pop("ingame_installed", None)
         companion.save_config(cfg)
+        log.info("UE4SS was taken out of %s: it stays out (start the program with --menu-button to put it back)",
+                 where)
+        return
+    first = cfg.get("ingame_installed") != where
     try:
         st = ue4ss.install(binaries, companion.VERSION, companion.CONFIG_DIR / "ingame")
     except (OSError, RuntimeError) as e:
-        print(f"  Couldn't add the Multiplayer button to inZOI's main menu: {e}")
+        if first:
+            notify(f"Couldn't add the Multiplayer button to inZOI's main menu: {e}", error=True)
+        else:
+            log.warning("couldn't update the main menu's Multiplayer button: %s", e)
         return
-    if not st.get("restart"):
-        return
-    print("\n  Added a \"Multiplayer\" button to inZOI's main menu. It runs on UE4SS, a script loader, here:")
-    print(f"    {binaries}")
-    print("  (the file dwmapi.dll and the folder ue4ss there). To take it out, delete those two.")
-    if menu.game_window():
-        restart_game()
+    cfg.update(game_bin=where, ingame_menu=True, ingame_installed=where)
+    companion.save_config(cfg)
+    running = bool(menu.game_window())
+    lobby = lobby_window() if running and (st.get("restart") or not script_running()) else None
+    lines = []
+    if first:
+        lines.append("Added a \"Multiplayer\" button to inZOI's main menu. It runs on UE4SS, a free script loader "
+                     f"for Unreal games, which is now in this folder:\n\n{where}\n\n"
+                     "To take it out, delete the file dwmapi.dll and the folder ue4ss there.")
+    if lobby:
+        lines.append("inZOI restarts now so the button shows up.")
+    elif first and running:
+        lines.append("It shows up the next time you start inZOI.")
+    if lines:
+        notify("\n\n".join(lines))
+    if lobby:
+        restart_game(lobby)
 
 
-def restart_game():
-    """inZOI loads the button when it starts: if it's on its main menu (nothing to lose there), restart it now."""
+def lobby_window() -> str | None:
+    """inZOI's main menu window, if that's where the game is (a restart loses nothing there)."""
     import game as game_mod
     g = game_mod.Game()
     try:
         state = g.call("game.get_state")
         if not (isinstance(state, dict) and state.get("phase") == "lobby"):
-            print("  It shows up the next time you start inZOI.")
-            return
+            return None
         res = g.call("ui.list_windows")
         text = res.get("_text", "") if isinstance(res, dict) else ""
         data = json.loads(text[text.index("{"):]) if "{" in text else res
-        lobby = next((w["window"] for w in data.get("windows") or [] if w.get("ui_type") == "MainMenu"), None)
-        if not lobby:
-            print("  It shows up the next time you start inZOI.")
-            return
-        print("  Restarting inZOI so it shows up...")
-        g.call("ui.click", ref=f"{lobby}/BW_WBP_Button_Exit/BW_Button", force=True)     # the game's own Exit Game
+        return next((w["window"] for w in data.get("windows") or [] if w.get("ui_type") == "MainMenu"), None)
+    except (game_mod.GameError, OSError, ValueError, AttributeError) as e:
+        log.info("couldn't ask inZOI where it is: %s", e)
+        return None
+
+
+def restart_game(lobby: str):
+    """inZOI loads the button when it starts: close it through its own Exit Game, then start it again."""
+    import game as game_mod
+    log.info("restarting inZOI so the Multiplayer button shows up")
+    try:
+        game_mod.Game().call("ui.click", ref=f"{lobby}/BW_WBP_Button_Exit/BW_Button", force=True)
     except (game_mod.GameError, OSError, ValueError) as e:
         log.info("couldn't restart inZOI: %s", e)
-        print("  It shows up the next time you start inZOI.")
         return
     for _ in range(120):                                 # (it saves its settings and closes)
         if not menu.game_window():
             break
         time.sleep(0.5)
     else:
-        print("  inZOI didn't close: restart it yourself to see the button.")
+        log.info("inZOI didn't close")
         return
     time.sleep(2)
+    start_game()
+
+
+def start_game():
+    """The Multiplayer button on the game's main menu needs this program running: start inZOI along with it."""
     global GAME_STARTED
+    if os.name != "nt" or testing() or GAME_STARTED or menu.game_window():
+        return
     GAME_STARTED = True
     os.startfile(GAME_URL)                                           # noqa: S606 - Steam starts the game
-    print("  Starting inZOI again...")
-
-
-def offer_game():
-    """The "Multiplayer" item on the game's main menu needs this program running: start inZOI along with it."""
-    if os.name != "nt" or not interactive() or GAME_STARTED or menu.game_window():
-        return
-    os.startfile(GAME_URL)                                           # noqa: S606 - Steam starts the game
-    print("  Starting inZOI...")
-
-
-def pause():
-    """A double-clicked exe's window closes the moment it exits: keep it open so the message can be read."""
-    if getattr(sys, "frozen", False) and interactive():
-        try:
-            input("  Press Enter to close this window.")
-        except (EOFError, KeyboardInterrupt):
-            pass
+    log.info("starting inZOI")
 
 
 if __name__ == "__main__":
@@ -347,12 +464,11 @@ if __name__ == "__main__":
     except SystemExit as e:
         if e.code not in (None, 0):
             if isinstance(e.code, str):
-                print(f"\n  {e.code}\n")
-            pause()
+                log.warning("%s", e.code)
+                fail(e.code)
             sys.exit(e.code if isinstance(e.code, int) else 1)
     except Exception:                                     # noqa: BLE001 - show it, don't just vanish
         traceback.print_exc()
         logging.getLogger().exception("crashed")
-        print(f"\n  Something went wrong (details in {companion.CONFIG_DIR / 'companion.log'}).\n")
-        pause()
+        fail(f"Something went wrong, so inZOI Multiplayer closed (details in {companion.CONFIG_DIR / 'companion.log'}).")
         sys.exit(1)

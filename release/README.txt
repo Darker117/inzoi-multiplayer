@@ -7,14 +7,18 @@ out, dance and chat where they really are. Your Zoi shows up in their worlds the
 Everyone keeps playing their own save. Friends appear in it as visitors: they only do what the real player does.
 
 
-WHAT DO YOU WANT TO DO?
------------------------
+HOW IT WORKS
+------------
+Double-click "inZOI Multiplayer.exe". inZOI starts, and its main menu has a "Multiplayer" button: joining a server,
+hosting your own, your name and updates are all there. The program has no window of its own: it runs while inZOI
+runs, and closes by itself after inZOI closes.
+
+The first time, it adds the Multiplayer button to inZOI and tells you where (see THE MULTIPLAYER MENU). If inZOI is
+already on its main menu, it restarts inZOI once so the button shows up.
+
   A. JOIN A FRIEND     a friend runs the server, you just play                    (most people)
   B. HOST AND PLAY     you run the server on your PC, and you play too
   C. HOST ONLY         you run the server for your friends (a PC or a Raspberry Pi), without playing on it
-
-To change your name, the server address or a password later: open the program and type 4 (Settings).
-Or, easier: while the program runs, inZOI's main menu has a "Multiplayer" item (see THE MULTIPLAYER MENU).
 
 Everyone needs inZOI on Windows (all on the same game version) and the file "inZOI Multiplayer.exe".
 
@@ -32,40 +36,37 @@ Your host gives you:  the server address (it looks like 100.101.102.103)
        GitHub account is fine).
      - Open the invite link and click Accept.
    Tailscale has to be on (Connected) whenever you play.
-2. Double-click "inZOI Multiplayer.exe". Type 1 and press Enter.
-3. The first time, it asks two things:
-     Your name ........... what your friends will see
-     Server address ...... the address your host gave you
-   It remembers them: next time, just press Enter. To change them, type 4 (Settings) instead of 1.
-4. Start inZOI (the program offers to start it for you).
-     On the main menu, "Multiplayer" shows the servers: you can join another one there any time.
-     The first time: load the save you want to play with friends. The program asks whether to make a
-     multiplayer copy of it (see YOUR MULTIPLAYER SAVE).
-     After that: just wait at the main menu. The program loads your multiplayer save for you.
+2. Double-click "inZOI Multiplayer.exe". inZOI starts.
+3. On the main menu, click Multiplayer, then Private Servers, then Add Server. Type the address your host gave
+   you (and the password, if the server has one) and click "Save and Join".
+   Servers anyone can join are under Public Servers: select one and click Join.
+4. The first time: load the save you want to play with friends. The program asks whether to make a multiplayer
+   copy of it (see YOUR MULTIPLAYER SAVE).
+   After that: just wait at the main menu. The program joins your server again and loads your multiplayer save.
    The inZOI Multiplayer panel appears on the left of the screen.
-   Keep the program's window open while you play. Close it when you're done.
 
-If your host uses a password: open the program, type 4 (Settings) and enter it at "Password of that server".
-(Or in the game: the panel's Settings, Password, Save.)
+Friends see your Steam name. To change it: Multiplayer, then "Your Name".
 
 
 B. HOST AND PLAY
 ----------------
-1. Double-click "inZOI Multiplayer.exe". Type 2 and press Enter.
-2. The first time, it asks for your name and a password (optional: press Enter for none). To change them
-   later, type 4 (Settings) instead of 2.
+1. Double-click "inZOI Multiplayer.exe". inZOI starts.
+2. On the main menu, click Multiplayer, then Private Servers, then "Host a Server". Give it a name and, if you
+   like, a password, then click "Start Hosting".
    If Windows asks whether inZOI Multiplayer may use the network, click Allow.
-3. The window shows the address and password to give your friends:
+3. Select your server in the list: it shows the addresses to give your friends:
      100.x.x.x ......... for friends anywhere, through Tailscale (see PLAYING OVER THE INTERNET below)
      192.168.x.x ....... for friends in your home
-4. Start inZOI, the same way as in A, step 4. Keep the window open while you and your friends play.
+4. Play as in A, step 4. Your server runs while you play and comes back each time you start the program;
+   "Stop Hosting" ends it.
 
 
 C. HOST ONLY
 ------------
 On a Windows PC:
-  Double-click "inZOI Multiplayer.exe", type 3 and press Enter. It works like B, without the game. The window
-  shows the address and password to give your friends. Keep it open while they play. (Password or port: type 4.)
+  Make a shortcut to "inZOI Multiplayer.exe", add  --host-only  at the end of its Target, and start the program
+  with that shortcut. It opens a window with the address and password for your friends (it asks for a password
+  the first time). Keep it open while they play. Typing  play  in that window makes the PC a normal player again.
 
 On a Raspberry Pi or another Linux computer:
   1. Copy the "server for Raspberry Pi or Linux" folder to it and run:   python3 inzoi_mp_server.py
@@ -105,9 +106,9 @@ inZOI's main menu has a "Multiplayer" item, under New Game: a real game button. 
 the game, made of the game's own Mods page parts; Back or Esc returns to the main menu. In the game (a save
 loaded), the panel's "Servers" button opens the servers page in a browser window.
 For this the program adds UE4SS (an open-source script loader for Unreal games, MIT license) next to the game by
-itself: "dwmapi.dll" and a "ue4ss" folder in inZOI\BlueClient\Binaries\Win64 (it shows you where). Nothing of the
-game's own changes. To take it out: close inZOI and delete those two; to keep it out, also type 4 (Settings) in the
-program and answer "off" for the button.
+itself: "dwmapi.dll" and a "ue4ss" folder in inZOI\BlueClient\Binaries\Win64 (a message tells you where). Nothing
+of the game's own changes. To take it out: close inZOI and delete those two. They stay out (to put them back, start
+the program once with  --menu-button ).
 Without UE4SS the program draws the Multiplayer item over the menu itself (then the game must be in windowed or
 borderless full screen) and the servers page opens in a browser window.
   - Public Servers: servers anyone can join, with how many play there, their ping and their mods. Select one to
@@ -125,6 +126,10 @@ borderless full screen) and the servers page opens in a browser window.
       earlier versions of the shared world, and the server's log
   - Each server keeps its own multiplayer save: switching servers switches saves, and coming back to a server
     brings back the save you played there.
+  - Your Name: what friends see over your Zoi and in the chat (your Steam name to begin with).
+  - Updates: the program checks for a new version by itself. When one is out, inZOI shows a notice and the
+    Multiplayer page offers it ("Update to ..." at the top). "Update Now" downloads it and restarts the program in
+    a few seconds; inZOI keeps running. ("Later": the button stays there.)
 Public servers are listed by a server that keeps the list (one started with --directory, like a Raspberry Pi
 everyone connects to). If your public server shows "can't be reached", friends outside your home can't get to your
 PC: use Tailscale (see PLAYING OVER THE INTERNET) or forward the port in your router.
@@ -147,12 +152,12 @@ YOUR MULTIPLAYER SAVE
 ---------------------
 Multiplayer plays in a save of its own, so your normal saves stay untouched by it: friends' Zois coming and
 going, the shared clock, friends' houses.
-  - The first time you play multiplayer, the program asks (in its window and in the panel):
-      c  make a multiplayer copy of the save you're in (recommended). The game saves, goes to the main menu
-         for a moment and loads the copy. Your original save stays as it was.
-      u  use the save you're in for multiplayer
-      n  not now (multiplayer stays off in this save)
-  - Coming back: open the program, start inZOI and wait at the main menu. It loads your multiplayer save.
+  - The first time you play multiplayer, the panel asks:
+      "Make a multiplayer copy" of the save you're in (recommended). The game saves, goes to the main menu for a
+         moment and loads the copy. Your original save stays as it was.
+      "Use this save" for multiplayer
+      "Not now" (multiplayer stays off in this save)
+  - Coming back: double-click the program and wait at inZOI's main menu. It loads your multiplayer save.
   - If you load a different save yourself, the program asks whether it's your multiplayer save. In any other
     save, multiplayer pauses there: friends' Zois leave and the shared clock leaves that save alone. The
     panel's "Switch to my multiplayer save" saves that game and takes you back.
@@ -162,12 +167,11 @@ going, the shared clock, friends' houses.
 MODS
 ----
 Everyone needs the same mods to see each other's clothes, hair and things. The program takes care of it:
-  - When someone hosts and plays (2), the host's mods count. Anyone missing some is asked "Download them now?",
-    in the program's window and in the panel's Mods tab.
-  - On a stand-alone server (3, or a Raspberry Pi), everyone's mods are shared: each player is offered the ones the
+  - When someone hosts and plays (B), the host's mods count. Anyone missing some is asked "Download them now?" in
+    the game (on the Multiplayer page, or in the panel's Mods tab).
+  - On a stand-alone server (C, or a Raspberry Pi), everyone's mods are shared: each player is offered the ones the
     others have. If two players have different versions of a mod, the newer one wins.
-  - A progress bar shows the download (and, for whoever shares, the upload), in the program's window and in the
-    Mods tab. Downloaded mods load the next time you start inZOI. If you say no, the Mods tab can still get them.
+  - A progress bar shows the download (and, for whoever shares, the upload) in the panel's Mods tab. Downloaded mods load the next time you start inZOI. If you say no, the Mods tab can still get them.
   - Only enabled mods are shared. A mod that gets replaced by a newer version is moved to
     %APPDATA%\inzoi-mp\replaced-mods, never deleted.
 
@@ -192,17 +196,14 @@ Everyone plays their own save, so a friend's house isn't in your world until you
 
 IF SOMETHING'S WRONG
 --------------------
-- The panel says the program isn't running: open "inZOI Multiplayer.exe" and keep its window open.
+- The Multiplayer button is dimmed, or the panel says the program isn't running: inZOI was started without the
+  program. Double-click "inZOI Multiplayer.exe" (it's fine while inZOI runs).
 - No "Multiplayer" on the main menu: the program restarts inZOI after adding it; if you were in a save, restart
-  inZOI yourself once. A dimmed
-  "Multiplayer" means the program isn't running: open it. (Without UE4SS the item is drawn by the program: then
-  the game has to be the window in front and in windowed or borderless full screen.)
-- Wrong server address, name or password: on the main menu, Multiplayer, then the server's Edit button. (Or close
-  the program, open it again and type 4, Settings.)
-- "Can't reach the server": check the address (type 4, Settings). If you play over the internet, check that
-  Tailscale is on (Connected) on your PC. Ask the host whether their server window is open.
-- To switch between joining and hosting: close the program and open it again. It shows the menu every time
-  (Enter picks what you chose last time).
+  inZOI yourself once. (Without UE4SS the item is drawn by the program: then the game has to be the window in
+  front and in windowed or borderless full screen.)
+- Wrong server address or password: Multiplayer, select the server, then Edit.
+- "Can't reach the server": check the address (Edit). If you play over the internet, check that Tailscale is on
+  (Connected) on your PC. Ask the host whether their server is running.
 - Your antivirus removed the program: restore it and allow it. It's flagged only because it's new and unsigned.
 - Logs (send them along when you report a problem): %APPDATA%\inzoi-mp\companion.log
 
@@ -212,9 +213,10 @@ GOOD TO KNOW
 - Building, menus and the map pause only your game. Friends' Zois wait in your world until you're back.
 - Objects in public places are the same in everyone's game, so a friend working out at the gym uses the same
   machine in your world. Homes can differ, so there some actions only show as the motion.
-- Close the program when you're done (the window's X or Ctrl+C), so friends' Zois leave your world cleanly.
+- The program closes by itself after inZOI closes, and takes friends' Zois out of your world cleanly.
 
 
 UNINSTALL
 ---------
-Delete  Documents\inZOI\Mods\InGame\InZOIMultiplayer  and  %APPDATA%\inzoi-mp, then the program.
+Delete  Documents\inZOI\Mods\InGame\InZOIMultiplayer  and  %APPDATA%\inzoi-mp, the file dwmapi.dll and the folder
+ue4ss in inZOI\BlueClient\Binaries\Win64, then the program.

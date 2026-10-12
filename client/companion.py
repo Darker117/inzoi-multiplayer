@@ -44,7 +44,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -99,7 +99,7 @@ def size_text(n: int) -> str:
 def first_run_setup(cfg: dict, ask_server: bool = True):
     """Ask for what a new player must know (it can be changed later in the in-game panel)."""
     what = "Two quick questions" if ask_server else "One quick question"
-    print(f"\n  Welcome to inZOI Multiplayer! {what} (change it any time: type 4 in the menu).\n")
+    print(f"\n  Welcome to inZOI Multiplayer! {what} (change it any time on the game's Multiplayer page).\n")
     name = ask(f"  Your name, as friends will see it [{cfg.get('name') or os.environ.get('USERNAME', 'Player')}]: ").strip()
     if name:
         cfg["name"] = name
@@ -119,12 +119,12 @@ def read_config() -> dict:
     return json.loads(CONFIG_FILE.read_text("utf-8")) if CONFIG_FILE.exists() else {}
 
 
-def load_config(args, ask_server: bool = True) -> dict:
-    """Saved settings + command line. Asks for what's still missing when someone is there to answer.
-    ask_server=False when hosting: the companion then connects to the server in this same program."""
+def load_config(args, ask_server: bool = True, ask: bool = True) -> dict:
+    """Saved settings + command line. Asks for what's still missing when someone is there to answer (and ask).
+    ask_server=False: no server needed (hosting, or one is picked on the game's Multiplayer page)."""
     cfg = read_config()
     need_server = ask_server and not cfg.get("server") and not args.server
-    if (need_server or (not cfg.get("name") and not args.name)) and interactive():
+    if (need_server or (not cfg.get("name") and not args.name)) and ask and interactive():
         first_run_setup(cfg, need_server)
     cfg.setdefault("key", secrets.token_urlsafe(24))
     for k in ("server", "port", "name", "password"):
@@ -236,8 +236,7 @@ class Companion(servers.Servers):
         self.auto_loaded = False     # the multiplayer save was loaded for this run already
         self.save_box = None         # the save question/notice the panel shows: {key, text, buttons}
         self.save_busy = False       # making the multiplayer copy / switching saves
-        self.update = None           # a newer version: {version, title, state, done, total, path}
-        self.update_box = None       # the update question the panel shows: {key, text, buttons}
+        self.update = None           # a newer version: {version, title, state, done, total, path, error}
         self.restart_args = ["--play"]   # how the launcher started me (an update restarts the same way)
         self.world_meta = None       # the server's shared world: {version, by, time, name, files, size}, or None
         self.world_box = None        # a shared-world question for the panel: {key, text, buttons}
@@ -1129,24 +1128,95 @@ class Companion(servers.Servers):
 
     # ------------------------------------------------------------------ updates
     async def update_loop(self):
-        """Look for a newer release on GitHub now and then; download it, then ask whether to restart into it."""
+        """Look for a newer release on GitHub at the start and every couple of hours. A new one is announced in the
+        game (a notice, and the Multiplayer page offers it); "Update" there downloads it and restarts into it."""
+        was = self.cfg.get("last_version")
+        if was != VERSION:
+            self.cfg["last_version"] = VERSION
+            save_config(self.cfg)
+            if was:
+                asyncio.get_running_loop().create_task(self.announce(f"inZOI Multiplayer is updated to {VERSION}."))
         await asyncio.sleep(20)
         while True:
-            if not self.update or self.update["state"] in ("error", "available"):
+            if not self.update or self.update["state"] in ("error", "available", "later"):
                 try:
                     await self.check_update()
                 except (OSError, ValueError) as e:
                     log.debug("update check: %s", e)
             await asyncio.sleep(2 * 3600)
 
+    async def announce(self, text: str, wait: float = 1800):
+        """A notice in the game once it's up (on its main menu or in a save)."""
+        end = time.time() + wait
+        while not self.ingame.game_running():
+            if time.time() > end:
+                return
+            await asyncio.sleep(3)
+        await asyncio.sleep(3)
+        await self.ingame_toast(text)
+
     async def check_update(self):
         info = await self.g(updater.latest, VERSION)
-        if not info:
+        if not info or (self.update and self.update["version"] == info["version"]):
             return
-        u = self.update = {**info, "state": "downloading", "done": 0, "total": info["size"], "path": None}
+        self.update = {**info, "state": "available", "done": 0, "total": info["size"], "path": None, "error": None}
+        log.info("inZOI Multiplayer %s is out (this is %s)", info["version"], VERSION)
+        self.console_ask(f"\n  ------------------------------------------------------------------------------\n"
+                         f"  {self.update_text()}\n  Type y (yes) or n (later) and press Enter [y]: ",
+                         lambda a: self.update_action(info["version"], "later" if a.startswith("n") else "update"))
+        asyncio.get_running_loop().create_task(self.announce(
+            f"inZOI Multiplayer {info['version']} is out: update it on the Multiplayer page."))
+
+    def update_text(self) -> str:
+        u = self.update
+        return (f"inZOI Multiplayer {u['version']} is out ({u['title']}). Update now? It downloads "
+                f"({size_text(u['total'])}) and restarts the program: your game keeps running, and friends' Zois "
+                "leave it for a few seconds.")
+
+    def update_view(self) -> dict | None:
+        """The update for the pages: {version, title, state, done, total, error, text}."""
+        u = self.update
+        if not u:
+            return None
+        out = {k: u.get(k) for k in ("version", "title", "state", "done", "total", "error")}
+        out["text"] = self.update_text()
+        return out
+
+    def update_box_view(self) -> dict | None:
+        """The update in the in-save panel: the question, the download's progress, or what went wrong."""
+        u = self.update
+        if not u or u["state"] == "later":
+            return None
+        key = u["version"]
+        if u["state"] == "available":
+            return {"key": key, "text": self.update_text(), "buttons": [{"id": "update", "label": "Update now"},
+                                                                        {"id": "later", "label": "Later"}]}
+        if u["state"] == "error":
+            return {"key": key, "text": f"The update didn't work: {u['error']}",
+                    "buttons": [{"id": "update", "label": "Try again"}, {"id": "later", "label": "Later"}]}
+        pct = int(100 * u["done"] / max(1, u["total"]))
+        text = f"Downloading inZOI Multiplayer {key}... {pct}%" if u["state"] == "downloading" else \
+            f"Restarting into inZOI Multiplayer {key}..."
+        return {"key": key, "text": text, "buttons": []}
+
+    def update_action(self, key: str, action: str):
+        """Update (download it, then restart into it) or later. Answered on a page or in the console."""
+        u = self.update
+        if not u or u["version"] != key:
+            return
+        if action == "later":
+            if u["state"] in ("available", "error"):
+                u["state"] = "later"
+                log.info("the update waits (the Multiplayer page still offers it)")
+            return
+        if u["state"] in ("available", "later", "error"):
+            u.update(state="downloading", done=0, error=None)
+            asyncio.get_running_loop().create_task(self.download_update())
+
+    async def download_update(self):
+        u = self.update
         if not updater.frozen():
-            u["state"] = "available"
-            log.info("inZOI Multiplayer %s is out on GitHub (you're running %s from source)", u["version"], VERSION)
+            u.update(state="error", error="this copy runs from source: get the new version from GitHub")
             return
         log.info("downloading inZOI Multiplayer %s", u["version"])
         bar = ProgressBar(f"Downloading update {u['version']}", u["total"])
@@ -1155,35 +1225,14 @@ class Companion(servers.Servers):
             u["done"] += n
             bar.add(n)
         try:
-            u["path"] = await self.g(updater.download, info, progress)
+            u["path"] = await self.g(updater.download, u, progress)
         except (OSError, ValueError) as e:
-            u["state"] = "error"
+            u.update(state="error", error=str(e))
             log.warning("downloading the update failed: %s", e)
             return
         bar.finish()
-        u["state"] = "ready"
-        self.ask_update()
-
-    def ask_update(self):
-        u = self.update
-        text = (f"inZOI Multiplayer {u['version']} is ready ({u['title']}). Restart the program now to update? "
-                "Friends' Zois leave your game for a few seconds; the game itself keeps running.")
-        self.update_box = {"key": u["version"], "text": text,
-                           "buttons": [{"id": "restart", "label": "Restart now"}, {"id": "later", "label": "Later"}]}
-        self.console_ask(f"\n  ------------------------------------------------------------------------------\n"
-                         f"  {text}\n  Type y (yes) or n (later) and press Enter [y]: ",
-                         lambda a: self.update_action(u["version"], "later" if a.startswith("n") else "restart"))
-
-    def update_action(self, key: str, action: str):
-        u = self.update
-        if not u or u["version"] != key or u["state"] != "ready":
-            return
-        self.update_box = None
-        if action == "later":
-            u["state"] = "later"
-            log.info("the update waits: it's applied the next time you start the program")
-            return
-        asyncio.get_running_loop().create_task(self.restart_into_update())
+        u["done"] = u["total"]
+        await self.restart_into_update()
 
     async def restart_into_update(self):
         u = self.update
@@ -1200,7 +1249,7 @@ class Companion(servers.Servers):
         try:
             await self.g(updater.apply, u["path"], self.restart_args)
         except OSError as e:
-            u["state"] = "error"
+            u.update(state="error", error=f"couldn't put the new version in place ({e})")
             log.warning("couldn't apply the update: %s", e)
             return
         logging.shutdown()
@@ -1440,7 +1489,7 @@ class Companion(servers.Servers):
                     "save": {"name": self.mp_name() if self.cfg.get("mp_save") else None,
                              "active": self.mp_active(), "box": self.save_box},
                     "update": {**{k: (self.update or {}).get(k) for k in ("version", "state", "done", "total")},
-                               "box": self.update_box},
+                               "box": self.update_box_view()},
                     "world": {"server": (self.world_meta or {}).get("version"), "local": self.local_world().get("version"),
                               "by": (self.world_meta or {}).get("by"), "box": self.world_status_box()}}
 
@@ -1530,7 +1579,7 @@ class Companion(servers.Servers):
 
         async def update_answer(body):
             self.update_action(str(body.get("key", "")), str(body.get("action", "")))
-            return {"ok": True, "box": self.update_box}
+            return {"ok": True, "box": self.update_box_view(), "update": self.update_view()}
 
         async def world_answer(body):
             self.world_action(str(body.get("key", "")), str(body.get("action", "")))

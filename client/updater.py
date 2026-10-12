@@ -1,9 +1,9 @@
 """Updates itself from GitHub: every release of github.com/Darker117/inzoi-multiplayer carries inZOI-Multiplayer.exe.
 
-check() asks GitHub for the latest release; a newer one is downloaded in the background into %APPDATA%/inzoi-mp/update
-and checked against the sha256 GitHub lists for it. The program then asks whether to restart now; apply() swaps the
-running exe for the new one (Windows lets a running exe be renamed, not overwritten: the old one becomes
-"<name>.old.exe" and is deleted by the next start) and starts it in the same mode.
+latest() asks GitHub for the latest release; the game's Multiplayer page offers a newer one, and "Update" downloads it
+into %APPDATA%/inzoi-mp/update, checks it against the sha256 GitHub lists for it, and apply() swaps the running exe for
+the new one (Windows lets a running exe be renamed, not overwritten: the old one becomes "<name>.old.exe" and is deleted
+by the next start) and starts it.
 
 Only the packaged exe updates itself. Run from source (python client/launcher.py), it just says a new version exists.
 """
@@ -112,8 +112,9 @@ def apply(new_exe: Path, args: list[str]):
         old.rename(exe)                                  # put things back as they were
         raise
     # A one-file exe started from another one would otherwise inherit its unpacked files (gone once this one exits).
+    # --restarted: it waits for this one to close.
     env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
-    subprocess.Popen([str(exe), *args], creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+    subprocess.Popen([str(exe), *args, "--restarted"], creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
                      close_fds=True, env=env)
 
 

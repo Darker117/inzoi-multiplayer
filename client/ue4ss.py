@@ -110,6 +110,22 @@ def _steam_libraries() -> list[Path]:
     return list(dict.fromkeys(libs))
 
 
+def steam_name() -> str | None:
+    """The name of the player signed in to Steam (what friends know them by), or None."""
+    for root in _steam_libraries()[:2]:
+        try:
+            text = (root / "config" / "loginusers.vdf").read_text("utf-8", "replace")
+        except OSError:
+            continue
+        users = re.findall(r'"\d+"\s*\{([^{}]*)\}', text)
+        recent = [u for u in users if re.search(r'"MostRecent"\s+"1"', u)] or users
+        for u in recent:
+            m = re.search(r'"PersonaName"\s+"([^"]+)"', u)
+            if m and m.group(1).strip():
+                return m.group(1).strip()[:32]
+    return None
+
+
 def game_binaries(cfg: dict | None = None) -> Path | None:
     """The folder with inZOI-Win64-Shipping.exe: the game's Binaries/Win64."""
     if os.environ.get("INZOI_MP_GAME_BIN"):                     # tests

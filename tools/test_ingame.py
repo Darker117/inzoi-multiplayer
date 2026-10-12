@@ -33,6 +33,7 @@ class FakeProgram:
     def __init__(self):
         self.calls = []
         self.saved = [row(PI, "The Pi", saved=True, password=True, password_saved=False)]
+        self.update = None
         self.public = [row(PUB, "Open World", public=True, players=3)]
         self.status = {"ok": True, "settings": {"name": "The Pi", "description": "", "motd": "hi", "public": False,
                                                 "password": "", "max_players": 16},
@@ -44,7 +45,8 @@ class FakeProgram:
         self.calls.append((path, body))
         if path == "/servers/state":
             return {"name": "Ana", "version": "0.7.0", "connected": False, "current": None, "saved": self.saved,
-                    "public": self.public, "directories": ["x"], "hosting": None, "admin": True, "mods": {}}
+                    "public": self.public, "directories": ["x"], "hosting": None, "admin": True, "mods": {},
+                    "update": self.update}
         if path == "/servers/save":
             if not body.get("address"):
                 return {"error": "Type the server's address."}
@@ -104,7 +106,8 @@ async def brain_tests(tmp: Path):
 
     await g.handle({"t": "tab", "value": "private"})
     v = g.view()
-    check(v["heading"] == "Private Servers" and [p["id"] for p in v["pills"]] == ["add", "host"], "private tab, pills")
+    check(v["heading"] == "Private Servers" and [p["id"] for p in v["pills"]] == ["add", "host", "name"],
+          "private tab, pills")
     await g.handle({"t": "select", "id": PI})
     await opened_tasks()
     v = g.view()
@@ -125,6 +128,48 @@ async def brain_tests(tmp: Path):
     check(g.modal and g.modal.get("error") and g.modal["fields"][2]["value"] == "X", "error shown, fields kept")
     await g.handle({"t": "dialog", "button": "save", "fields": {"address": "1.2.3.4", "name": "New"}})
     check(g.modal is None and g.selected["private"] == "1.2.3.4", "saved and selected")
+
+    # your name: changed from the page
+    await g.handle({"t": "pill", "id": "name"})
+    check(g.modal["id"] == "name" and g.modal["fields"][0]["value"] == "Ana", "name dialog, with the name now")
+    await g.handle({"t": "dialog", "button": "save", "fields": {"name": "  "}})
+    check(g.modal and g.modal.get("error"), "an empty name is refused")
+    await g.handle({"t": "dialog", "button": "save", "fields": {"name": " Ana  Banana "}})
+    names = [b for p, b in prog.calls if p == "/settings"]
+    check(g.modal is None and names == [{"name": "Ana Banana"}], "name saved")
+
+    # an update: offered as the page opens, then downloaded and put in place from the page
+    prog.update = {"version": "9.9.9", "title": "Big one", "state": "available", "done": 0, "total": 10485760,
+                   "error": None, "text": "inZOI Multiplayer 9.9.9 is out (Big one). Update now?"}
+    await g.handle({"t": "open"})
+    check(g.modal and g.modal["id"] == "update" and g.modal["desc"].startswith("inZOI Multiplayer 9.9.9 is out"),
+          "a new version: offered as the page opens")
+    check(g.view()["pills"][0] == {"id": "update", "text": "Update to 9.9.9", "icon": "download"}, "an Update pill")
+    check("9.9.9 is out" in g.view()["footer"], "and a word in the footer")
+    await g.handle({"t": "dialog", "button": "now", "fields": {}})
+    ups = [b for p, b in prog.calls if p == "/update"]
+    check(ups == [{"key": "9.9.9", "action": "update"}], "Update Now: the program updates")
+    prog.update.update(state="downloading", done=5242880)
+    await g.refresh()
+    v = g.view()
+    check(v["dialog"]["id"] == "updating" and "50%" in v["dialog"]["desc"] and not v["dialog"]["buttons"]
+          and v["pills"][0]["text"] == "Updating... 50%", "the download's progress, live")
+    prog.update.update(state="error", error="GitHub can't be reached.")
+    await g.refresh()
+    v = g.view()
+    check(v["dialog"]["title"] == "The Update Didn't Work" and "GitHub" in v["dialog"]["desc"], "what went wrong")
+    await g.handle({"t": "dialog", "button": "retry", "fields": {}})
+    ups = [b for p, b in prog.calls if p == "/update"]
+    check(len(ups) == 2 and ups[-1]["action"] == "update" and g.modal["id"] == "updating", "Try Again")
+    prog.update.update(state="available")
+    await g.handle({"t": "open"})
+    check(g.modal is None, "offered once: then it's the pill")
+    await g.handle({"t": "pill", "id": "update"})
+    await g.handle({"t": "dialog", "button": "later", "fields": {}})
+    ups = [b for p, b in prog.calls if p == "/update"]
+    check(ups[-1] == {"key": "9.9.9", "action": "later"} and g.modal is None, "Later")
+    prog.update = None
+    await g.refresh()
 
     # search and filters
     await g.handle({"t": "search", "value": "new"})
@@ -255,6 +300,7 @@ def launcher_tests(tmp: Path):
                 return {"clicked": True}
             return {}
 
+    cfgs = {}
     for case in ("lobby", "in_game"):
         game = tmp / f"game_{case}"
         game.mkdir()
@@ -277,7 +323,7 @@ def launcher_tests(tmp: Path):
             companion.save_config = lambda c: None
             try:
                 launcher.setup_ingame(cfg)
-                launcher.offer_game()
+                launcher.start_game()
             finally:
                 (ue4ss.game_binaries, menu.game_window, game_mod.Game, os.startfile, launcher.time.sleep,
                  companion.save_config) = orig
@@ -290,9 +336,83 @@ def launcher_tests(tmp: Path):
                   "on the main menu: inZOI restarted once")
         else:
             check(not clicked and not started and "next time" in text, "in a save: left alone")
+        cfgs[case] = cfg
     off = {"ingame_menu": False}
     launcher.setup_ingame(off)
-    check(off == {"ingame_menu": False}, "turned off in Settings: nothing happens")
+    check(off == {"ingame_menu": False}, "turned off: nothing happens")
+
+    def again(case, cfg):
+        out = io.StringIO()
+        orig = (ue4ss.game_binaries, menu.game_window, companion.save_config)
+        ue4ss.game_binaries = lambda cfg=None, g=tmp / f"game_{case}": g
+        menu.game_window = lambda: None
+        companion.save_config = lambda c: None
+        try:
+            with contextlib.redirect_stdout(out):
+                launcher.setup_ingame(cfg)
+        finally:
+            ue4ss.game_binaries, menu.game_window, companion.save_config = orig
+        return out.getvalue()
+    check(again("in_game", cfgs["in_game"]) == "" and cfgs["in_game"]["ingame_menu"] is True,
+          "the next start: kept up to date, nothing said")
+    (tmp / "game_lobby" / "dwmapi.dll").unlink()
+    again("lobby", cfgs["lobby"])
+    check(cfgs["lobby"]["ingame_menu"] is False and not (tmp / "game_lobby" / "dwmapi.dll").exists(),
+          "deleted by the player: it stays out")
+
+
+def lifetime_tests():
+    """No window: the program lives as long as inZOI. Once inZOI has closed it closes too (a host's server says
+    goodbye to friends, and comes back the next time)."""
+    import launcher
+    import menu
+    windows = iter([None, None, 7, 7] + [None] * 20)
+    orig = (menu.game_window, asyncio.sleep)
+    real_sleep = asyncio.sleep
+    menu.game_window = lambda: next(windows)
+    asyncio.sleep = lambda s, *a: real_sleep(0)
+    try:
+        check(asyncio.run(launcher.follow_game()) == "inZOI closed", "inZOI closed: the program closes too")
+        menu.game_window = lambda: None
+        launcher.NEVER_STARTED, keep = -1, launcher.NEVER_STARTED
+        check(asyncio.run(launcher.follow_game()) == "inZOI didn't start", "inZOI never came: it doesn't linger")
+        launcher.NEVER_STARTED = keep
+    finally:
+        menu.game_window, asyncio.sleep = orig
+
+    class FakeComp:
+        def __init__(self, cfg):
+            self.cfg, self.hosted, self.events = cfg, None, []
+            self.hosting = (24242, "")
+
+        async def start_hosting(self, play=True):
+            self.hosted = True
+            self.events.append("hosting")
+
+        async def stop_hosting(self):
+            self.hosted = None
+            self.cfg["mode"] = "play"
+            self.events.append("stopped")
+
+        async def run(self):
+            await asyncio.Event().wait()
+
+        def shutdown(self):
+            self.events.append("shutdown")
+
+    async def closed():
+        return "inZOI closed"
+    cfg = {"mode": "host"}
+    comp = FakeComp(cfg)
+    orig = (launcher.follow_game, launcher.show_addresses, launcher.companion.save_config)
+    launcher.follow_game, launcher.show_addresses, launcher.companion.save_config = closed, lambda *a: None, \
+        lambda c: None
+    try:
+        asyncio.run(launcher.run("host", cfg, comp))
+    finally:
+        launcher.follow_game, launcher.show_addresses, launcher.companion.save_config = orig
+    check(comp.events == ["hosting", "stopped", "shutdown"] and cfg["mode"] == "host",
+          "hosting: the server closes with inZOI, and comes back next time")
 
 
 def main():
@@ -304,6 +424,8 @@ def main():
         installer_tests(tmp)
         print("first start:")
         launcher_tests(tmp)
+        print("no window:")
+        lifetime_tests()
     print("all in-game tests passed")
 
 

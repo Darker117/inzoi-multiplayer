@@ -41,7 +41,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 PROTOCOL = 1
 MAX_LINE = 32 * 1024 * 1024        # house snapshots can be large
 PING_EVERY = 15                    # seconds between keepalives

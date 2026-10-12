@@ -1,7 +1,8 @@
 """End-to-end test of self-updating, with the real built exe (dist/inZOI-Multiplayer.exe) and nothing real touched:
 a stand-in "GitHub" offers version 9.9.9 (a copy of the same exe), the game address leads nowhere, the settings live
-in a temporary folder, and the panel API uses its own port. The exe must download the update, check it, ask, and on
-"Restart now" swap itself and come back as a new process from the same path.
+in a temporary folder, a stand-in game folder gets the main menu's button, and the panel API uses its own port. The
+exe must find the update and offer it; on "Update" it downloads and checks it, swaps itself and comes back as a new
+process from the same path (no window, no inZOI started: INZOI_MP_TEST).
 
     python tools/build_release.py && python tools/test_update.py
 """
@@ -55,9 +56,10 @@ def main():
         if keep:
             shutil.rmtree(tmp, ignore_errors=True)
             tmp.mkdir(parents=True)
-        app, web, data = tmp / "app", tmp / "web", tmp / "appdata"
-        for d in (app, web, data):
+        app, web, data, game = tmp / "app", tmp / "web", tmp / "appdata", tmp / "game"
+        for d in (app, web, data, game):
             d.mkdir()
+        (game / "inZOI-Win64-Shipping.exe").write_bytes(b"")
         shutil.copy2(exe, app / "inZOI Multiplayer.exe")
         shutil.copy2(exe, web / "inZOI-Multiplayer.exe")
         digest = hashlib.sha256((web / "inZOI-Multiplayer.exe").read_bytes()).hexdigest()
@@ -77,7 +79,8 @@ def main():
 
         env = {**os.environ, "APPDATA": str(data), "INZOI_MP_GAME_URL": "http://127.0.0.1:9/mcp",
                "INZOI_MP_DOCUMENTS": str(tmp / "Documents"),          # never the real game's mod folder
-               "INZOI_MP_PANEL_PORT": str(PANEL), "INZOI_MP_UPDATE_API": f"http://127.0.0.1:{port}/latest.json"}
+               "INZOI_MP_PANEL_PORT": str(PANEL), "INZOI_MP_UPDATE_API": f"http://127.0.0.1:{port}/latest.json",
+               "INZOI_MP_GAME_BIN": str(game), "INZOI_MP_TEST": "1"}
         server = subprocess.Popen([sys.executable, str(ROOT / "server" / "inzoi_mp_server.py"), "--port", "24390",
                                    "--data", str(tmp / "server")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -86,11 +89,14 @@ def main():
                              stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NEW_CONSOLE)
             first = wait(lambda: post("/status"), 30, "the program")
             print("running:", first["version"], "connected:", first["connected"])
-            ready = wait(lambda: (lambda s: s if s["update"]["state"] == "ready" else None)(post("/status")), 90,
-                         "the update to download")
-            print("update offered:", ready["update"]["box"]["text"][:70], "...")
+            assert (game / "dwmapi.dll").exists(), "the main menu's button goes in by itself"
+            offer = wait(lambda: (lambda s: s if s["update"]["state"] == "available" else None)(post("/status")), 90,
+                         "the update to be found")
+            print("update offered:", offer["update"]["box"]["text"][:70], "...")
+            page = post("/servers/state")["update"]
+            assert page["version"] == "9.9.9" and page["state"] == "available", page
             old_pids = procs_under(app)
-            post("/update", {"key": "9.9.9", "action": "restart"})
+            post("/update", {"key": "9.9.9", "action": "update"})
             wait(lambda: not set(old_pids) & set(procs_under(app)), 30, "the old program to exit")
             after = wait(lambda: post("/status"), 40, "the updated program to start")
             print("came back:", after["version"], "connected:", after["connected"])
