@@ -20,6 +20,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+import ingame
 import menu
 import mods
 import netinfo
@@ -136,6 +137,9 @@ class Servers:
         self.local_mods = (0.0, [])
         self.page = menu.Page(page_profile)
         self.menu_item = None
+        # the Multiplayer page inside the game (UE4SS script): fed through files next to the page's browser profile
+        self.ingame = ingame.InGame(page_profile.parent / "ingame", self.ingame_api, self.ingame_open_mods,
+                                    self.ingame_toast)
         if not self.cfg.get("servers") and self.cfg.get("server") and self.cfg["server"] not in LOCAL:
             self.remember(address_text(self.cfg["server"], self.cfg.get("port", 24242)), self.cfg.get("password", ""))
 
@@ -449,7 +453,7 @@ class Servers:
         while True:
             spot = None
             try:
-                hwnd = await asyncio.to_thread(menu.game_window) if not self.page.is_open() else None
+                hwnd = await asyncio.to_thread(menu.game_window)                     if not self.page.is_open() and not self.ingame.game_running() else None
                 if hwnd and menu.in_front(hwnd, self.menu_item.hwnd):
                     top = await self.g(self.top_window)
                     if top:
@@ -466,6 +470,40 @@ class Servers:
             else:
                 self.menu_item.hide()
             await asyncio.sleep(0.25 if spot else 0.6)
+
+    # ------------------------------------------------------------------ the page inside the game (UE4SS script)
+    async def ingame_loop(self):
+        await self.ingame.run(self.version)
+
+    async def ingame_api(self, path: str, body: dict) -> dict:
+        """The in-game page's calls: the very same handlers the browser page's calls go to."""
+        routes = getattr(self, "_ingame_routes", None)
+        if routes is None:
+            routes = self._ingame_routes = self.ui_routes()
+        return await routes[path](body)
+
+    async def ingame_open_mods(self):
+        """Ask the game to open its Mods page: the script turns it into the servers page as it's built."""
+        def click():
+            res = self.game.call("ui.list_windows")
+            text = res.get("_text", "") if isinstance(res, dict) else ""
+            data = json.loads(text[text.index("{"):]) if "{" in text else res
+            win = next((w["window"] for w in data.get("windows") or [] if w.get("ui_type") == "MainMenu"), None)
+            if not win:
+                return False
+            self.game.call("ui.click", ref=f"{win}/BW_WBP_Button_Mod/BW_Button", force=True)
+            return True
+        try:
+            if not await self.g(click):
+                log.info("the servers page opens from the main menu")
+        except (GameError, OSError, ValueError) as e:
+            log.warning("couldn't open the servers page in the game: %s", e)
+
+    async def ingame_toast(self, text: str):
+        try:
+            await self.g(self.game.call, "toast.show", message=text, immediate=True)
+        except (GameError, OSError) as e:
+            log.debug("toast: %s", e)
 
     def top_window(self) -> dict | None:
         """The game's main menu, if it's what's on top (no Mods page, popup or loading screen over it)."""

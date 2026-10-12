@@ -28,7 +28,12 @@ DIST = ROOT / "dist"
 VENV_PY = BUILD / "venv" / "Scripts" / "python.exe"
 EXE_NAME = "inZOI Multiplayer"
 LINUX_SERVER = ["inzoi_mp_server.py", "PROTOCOL.md", "inzoi-mp.service"]
-SKIP_MOD = {"MPCmd.lua", "MPBulk.lua", "inject.json", "__pycache__", "out"}
+SKIP_MOD = {"MPCmd.lua", "MPBulk.lua", "inject.json", "__pycache__", "out", "signals_dir.txt", "version.txt"}
+# UE4SS (github.com/UE4SS-RE/RE-UE4SS, MIT), the script loader behind the main menu's Multiplayer button: the very
+# build that was tested with inZOI, checked by its sha256 (the "experimental-latest" release changes every day).
+UE4SS_ZIP = "UE4SS_v3.0.1-1165-g12ec45a0.zip"
+UE4SS_SHA256 = "d51512869bde8c32a1ebd6732a01fbb1343e6b3e0fb9cd0d8a9b1841b68cba97"
+UE4SS_URL = "https://github.com/UE4SS-RE/RE-UE4SS/releases/download/experimental-latest/" + UE4SS_ZIP
 
 BG, BLUE, MINT = (22, 34, 56), (90, 168, 240), (127, 209, 185)      # the in-game panel's colours
 
@@ -145,12 +150,38 @@ def sync_versions(version: str):
     server.write_text(re.sub(r'^VERSION = "[^"]*"', f'VERSION = "{version}"', text, count=1, flags=re.M), "utf-8")
 
 
+def ue4ss_runtime() -> Path:
+    """UE4SS's files for the exe (build/ue4ss_runtime), from the pinned zip (build/cache, downloaded once)."""
+    import hashlib
+    import urllib.request
+    out = BUILD / "ue4ss_runtime"
+    zpath = BUILD / "cache" / UE4SS_ZIP
+    if not zpath.exists():
+        zpath.parent.mkdir(parents=True, exist_ok=True)
+        print(f"downloading {UE4SS_URL}")
+        urllib.request.urlretrieve(UE4SS_URL, zpath)
+    digest = hashlib.sha256(zpath.read_bytes()).hexdigest()
+    if digest != UE4SS_SHA256:
+        raise SystemExit(f"{zpath} isn't the tested UE4SS build (sha256 {digest}); put the right one in build/cache")
+    if out.exists():
+        shutil.rmtree(out)
+    with zipfile.ZipFile(zpath) as z:
+        for name, dest in (("dwmapi.dll", "dwmapi.dll"), ("ue4ss/UE4SS.dll", "ue4ss/UE4SS.dll"),
+                           ("ue4ss/UE4SS-settings.ini", "ue4ss/UE4SS-settings.ini"), ("ue4ss/LICENSE", "ue4ss/LICENSE")):
+            (out / dest).parent.mkdir(parents=True, exist_ok=True)
+            (out / dest).write_bytes(z.read(name))
+    return out
+
+
 def build_exe(version: str) -> Path:
     stage = BUILD / "stage"
     if stage.exists():
         shutil.rmtree(stage)
     shutil.copytree(ROOT / "mod" / "InZOIMultiplayer", stage / "mod" / "InZOIMultiplayer",
                     ignore=lambda d, names: [n for n in names if n in SKIP_MOD])
+    shutil.copytree(ROOT / "mod" / "ue4ss", stage / "ue4ss_mod",
+                    ignore=lambda d, names: [n for n in names if n in SKIP_MOD])
+    runtime = ue4ss_runtime()
     icon, vfile = ROOT / "release" / "icon.ico", BUILD / "version_info.txt"
     if not icon.exists():                                   # the chosen icon; without it, draw the built-in one
         icon = BUILD / "icon.ico"
@@ -164,6 +195,8 @@ def build_exe(version: str) -> Path:
         "--add-data", f"{stage / 'mod'}{os.pathsep}mod",
         "--add-data", f"{ROOT / 'client' / 'struct_cache.json'}{os.pathsep}.",
         "--add-data", f"{ROOT / 'client' / 'page'}{os.pathsep}page",       # the servers page, with its font
+        "--add-data", f"{runtime}{os.pathsep}ue4ss_runtime",                # UE4SS, for the main menu's button
+        "--add-data", f"{stage / 'ue4ss_mod'}{os.pathsep}ue4ss_mod",        # our script for it
         "--exclude-module", "tkinter", "--exclude-module", "unittest", "--exclude-module", "pydoc",
         "--distpath", str(BUILD / "exe"), "--workpath", str(BUILD / "pyinstaller"), "--specpath", str(BUILD),
         str(ROOT / "client" / "launcher.py")], check=True)

@@ -44,7 +44,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -282,7 +282,7 @@ class Companion(servers.Servers):
             raise SystemExit("inZOI Multiplayer is already running in another window. Use that one "
                              "(or close it first).") from None
         for loop in (self.game_loop, self.mailbox_loop, self.mods_loop, self.update_loop, self.menu_loop,
-                     self.directory_loop):
+                     self.directory_loop, self.ingame_loop):
             asyncio.create_task(loop())
         backoff = 2
         while True:

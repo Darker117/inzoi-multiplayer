@@ -28,6 +28,7 @@ import companion  # noqa: E402
 import inzoi_mp_server as mpserver  # noqa: E402
 import menu  # noqa: E402
 import netinfo  # noqa: E402
+import ue4ss  # noqa: E402
 import updater  # noqa: E402
 
 log = logging.getLogger("launcher")
@@ -85,6 +86,22 @@ def edit_settings(cfg: dict):
     port = companion.ask(f"  Port for your server [{cfg.get('host_port') or 24242}]: ").strip()
     if port.isdigit():
         cfg["host_port"] = int(port)
+    if os.name == "nt" and ue4ss.available():
+        on = cfg.get("ingame_menu")
+        print("\n  inZOI's main menu:")
+        ans = companion.ask(f"  Multiplayer button on the main menu (adds UE4SS next to the game) "
+                            f"[{'on' if on else 'off'}] (on/off): ").strip().lower()
+        if ans in ("off", "n", "no") and on:
+            cfg["ingame_menu"] = False
+            binaries = ue4ss.game_binaries(cfg)
+            if binaries and menu.game_window():
+                print("  Close inZOI first, then turn it off here again.")
+                cfg["ingame_menu"] = True
+            elif binaries:
+                ue4ss.uninstall(binaries)
+                print("  Taken out of the game folder.")
+        elif ans in ("on", "y", "yes") and not on:
+            cfg["ingame_menu"] = True
     companion.save_config(cfg)
     print("\n  Saved.")
 
@@ -229,6 +246,7 @@ def main():
         companion.on_console_close(comp.shutdown)
         where = "your own server (this PC)" if mode == "host" else f"server {cfg['server']}:{cfg['port']}"
         log.info("inZOI Multiplayer %s - %s, your name %s", companion.VERSION, where, cfg["name"])
+        setup_ingame(cfg)
         offer_game()
     try:
         asyncio.run(run(mode, cfg, comp))
@@ -237,6 +255,40 @@ def main():
             comp.shutdown()
             time.sleep(0.5)
         log.info("stopped")
+
+
+def setup_ingame(cfg: dict):
+    """The real "Multiplayer" item on inZOI's main menu (and the servers page inside the game) need UE4SS, a script
+    loader, next to the game. Ask once; after a yes, keep it and our script up to date every start."""
+    if os.name != "nt" or not ue4ss.available():
+        return
+    if cfg.get("ingame_menu") is None:
+        if not interactive():
+            return
+        print()
+        print("  inZOI Multiplayer can put a real \"Multiplayer\" button on inZOI's main menu, with the servers page")
+        print("  inside the game. For that it adds UE4SS (an open-source script loader for Unreal games) next to the")
+        print("  game: one file and one folder in its Binaries folder. Nothing of the game's own changes, and you can")
+        print("  take it out again any time (main menu of this program: Settings).")
+        answer = companion.ask("  Add it? Type y or n [y]: ").strip().lower()
+        cfg["ingame_menu"] = not answer.startswith("n")
+        companion.save_config(cfg)
+    if not cfg.get("ingame_menu"):
+        return
+    binaries = ue4ss.game_binaries(cfg)
+    if not binaries:
+        print("  Couldn't find inZOI's folder for the main menu's Multiplayer button. Start inZOI, then this program.")
+        return
+    if cfg.get("game_bin") != str(binaries):
+        cfg["game_bin"] = str(binaries)
+        companion.save_config(cfg)
+    try:
+        st = ue4ss.install(binaries, companion.VERSION, companion.CONFIG_DIR / "ingame")
+    except (OSError, RuntimeError) as e:
+        print(f"  Couldn't add the Multiplayer button to inZOI's main menu: {e}")
+        return
+    if st.get("restart") and menu.game_window():
+        print("  The Multiplayer button shows up on inZOI's main menu the next time you start inZOI.")
 
 
 def offer_game():

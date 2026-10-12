@@ -11,3 +11,4 @@ __pycache__/
 research/
 server/data/
 tools/.fake_player_key
+mod/ue4ss/InZOIMultiplayer/Scripts/signals_dir.txt

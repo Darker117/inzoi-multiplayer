@@ -88,10 +88,17 @@ public IP address.
 
 ## The Multiplayer menu
 
-While the program runs, inZOI's main menu has a **Multiplayer** item under New Game. (The game doesn't load mods'
-UI on its main menu, so the program draws the item there itself.) It opens the servers page full screen, styled
-like the game's own Mods page. **Back** or **Esc** returns to the game; in the game, the panel's **Servers** button
-opens it too.
+inZOI's main menu gets a real **Multiplayer** item under New Game: the game's own menu button, with its hover
+butterfly and sounds. It opens the servers page **inside the game**: the game's own Mods page, turned into the
+servers page, so the tabs, filters, server rows, details, buttons and dialogs are the game's own. **Back** or **Esc**
+returns to the main menu.
+
+The item and the page come from a small script run by [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) (an open-source
+script loader for Unreal Engine games, MIT license). The program asks once, then puts UE4SS and the script next to
+the game (`dwmapi.dll` and a `ue4ss` folder in inZOI's `BlueClient/Binaries/Win64`); nothing of the game's own
+changes, and the program's Settings (4) can take it out again. Without it, the program draws a stand-in item over the
+menu and opens the servers page in a full-screen browser window. In the game (a save loaded), the panel's
+**Servers** button opens that browser page too.
 
 - **Public Servers**: servers anyone can join, with players, ping and mods. Select one to see whether you can
   join: its version, room, password, and which of its mods you have or would download. **Join** gets you in, and
@@ -198,9 +205,13 @@ Everyone needs the same mods to see each other's clothes, hair and things, and t
 - **The server** (`server/`) relays live state, chat and houses between players and remembers profiles. It also
   answers the servers page (info before joining, the admin console) and, with `--directory`, keeps the list of
   public servers. See [`server/PROTOCOL.md`](server/PROTOCOL.md).
-- **The servers page** (`client/page/`) is served by the program and opened in a full-screen Edge window over the
-  game; the **Multiplayer** item on the main menu is a see-through window the program draws (`client/menu.py`). The
-  page uses the Inter font (SIL Open Font License, `client/page/fonts/OFL.txt`).
+- **The in-game Multiplayer page** (`mod/ue4ss/InZOIMultiplayer`, a UE4SS Lua script, installed by
+  `client/ue4ss.py`) adds the main menu's Multiplayer item and turns the game's Mods page into the servers page out
+  of the game's own widgets. The program decides what it shows and does what its buttons ask
+  (`client/ingame.py`), through files in `%APPDATA%/inzoi-mp/ingame`.
+- **The browser servers page** (`client/page/`) is served by the program and opened in a full-screen Edge window;
+  without UE4SS, the **Multiplayer** item is a see-through window the program draws (`client/menu.py`). The page
+  uses the Inter font (SIL Open Font License, `client/page/fonts/OFL.txt`).
 
 ## Build from source
 
